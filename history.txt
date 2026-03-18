@@ -1,0 +1,10 @@
+#V2
+DEFINE NAMESPACE minecraft;
+USE NS minecraft;
+DEFINE DATABASE companion;
+USE DB companion;
+INFO FOR DB;
+USE NS minecraft DB companion;
+UPDATE type::record("characters", "guardian") CONTENT { name: "Guardian" } RETURN AFTER;
+USE NS minecraft DB companion;
+UPSERT type::record("characters", "guardian") CONTENT { name: "Guardian" } RETURN AFTER;

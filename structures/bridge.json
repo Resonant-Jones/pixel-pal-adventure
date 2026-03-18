@@ -1,0 +1,32 @@
+{
+  "name": "bridge",
+  "displayName": "bridge",
+  "footprint": {
+    "width": 3,
+    "depth": 7,
+    "height": 1
+  },
+  "placements": [
+    { "block": "oak_planks", "x": 0, "y": 0, "z": 0 },
+    { "block": "oak_planks", "x": 1, "y": 0, "z": 0 },
+    { "block": "oak_planks", "x": 2, "y": 0, "z": 0 },
+    { "block": "oak_planks", "x": 0, "y": 0, "z": 1 },
+    { "block": "oak_planks", "x": 1, "y": 0, "z": 1 },
+    { "block": "oak_planks", "x": 2, "y": 0, "z": 1 },
+    { "block": "oak_planks", "x": 0, "y": 0, "z": 2 },
+    { "block": "oak_planks", "x": 1, "y": 0, "z": 2 },
+    { "block": "oak_planks", "x": 2, "y": 0, "z": 2 },
+    { "block": "oak_planks", "x": 0, "y": 0, "z": 3 },
+    { "block": "oak_planks", "x": 1, "y": 0, "z": 3 },
+    { "block": "oak_planks", "x": 2, "y": 0, "z": 3 },
+    { "block": "oak_planks", "x": 0, "y": 0, "z": 4 },
+    { "block": "oak_planks", "x": 1, "y": 0, "z": 4 },
+    { "block": "oak_planks", "x": 2, "y": 0, "z": 4 },
+    { "block": "oak_planks", "x": 0, "y": 0, "z": 5 },
+    { "block": "oak_planks", "x": 1, "y": 0, "z": 5 },
+    { "block": "oak_planks", "x": 2, "y": 0, "z": 5 },
+    { "block": "oak_planks", "x": 0, "y": 0, "z": 6 },
+    { "block": "oak_planks", "x": 1, "y": 0, "z": 6 },
+    { "block": "oak_planks", "x": 2, "y": 0, "z": 6 }
+  ]
+}

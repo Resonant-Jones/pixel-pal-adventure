@@ -1,0 +1,5 @@
+.env
+.local/
+node_modules/
+dashboard/dist/
+dashboard/src-tauri/target/
