@@ -857,7 +857,14 @@ class MinecraftBotAdapter extends EventEmitter {
     this.stopPathing();
     this.bot = null;
     try {
-      bot.quit("Guardian signing off");
+      if (typeof bot.end === "function") {
+        await Promise.resolve(bot.end("Guardian signing off"));
+        return;
+      }
+
+      if (typeof bot.quit === "function") {
+        await Promise.resolve(bot.quit("Guardian signing off"));
+      }
     } catch (error) {
       this.logger.warn("[minecraft] Bot quit failed during disconnect:", error.message);
     }

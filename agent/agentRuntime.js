@@ -1667,6 +1667,8 @@ class AgentRuntime {
       source: "runtime"
     });
     const { summary, scope } = result;
+    const isSuccessfulLearningOutcome = (event) =>
+      ["succeeded", "success"].includes(event.terminal_outcome);
 
     await this.botAdapter.say(summary);
     this.setRuntimeState({
@@ -1675,10 +1677,10 @@ class AgentRuntime {
             retryDomain: "action",
             normalizedSignature: "what_worked",
             successCount: Array.isArray(result.events)
-              ? result.events.filter((event) => event.terminal_outcome === "succeeded").length
+              ? result.events.filter(isSuccessfulLearningOutcome).length
               : 0,
             failureCount: Array.isArray(result.events)
-              ? result.events.filter((event) => event.terminal_outcome !== "succeeded").length
+              ? result.events.filter((event) => !isSuccessfulLearningOutcome(event)).length
               : 0,
             latestTimestamp: new Date().toISOString(),
             summary
@@ -2016,7 +2018,7 @@ class AgentRuntime {
           actionType: reply?.action?.type || "none",
           provider: this.llmProvider,
           operationSubtype: "execution",
-          terminalOutcome: RETRY_TERMINAL_OUTCOMES.SUCCEEDED
+          terminalOutcome: RETRY_TERMINAL_OUTCOMES.SUCCESS
         });
 
         return {
@@ -2222,8 +2224,8 @@ class AgentRuntime {
 
     if (this.learningStore && attemptEvent?.id && outcomeEvent?.id) {
       await this.learningStore.relateAttemptOutcome({
-        attemptId: String(attemptEvent.id),
-        outcomeId: String(outcomeEvent.id),
+        attemptId: attemptEvent.id,
+        outcomeId: outcomeEvent.id,
         threadId: attemptEnvelope.threadId,
         worldId: attemptEnvelope.worldId,
         turnId: attemptEnvelope.turnId

@@ -1,5 +1,6 @@
 const { getStatementRows } = require("./surrealClient");
 const { buildSignatureKey } = require("../agent/retrySignatures");
+const { RecordId } = require("surrealdb");
 
 function toIso() {
   return new Date().toISOString();
@@ -19,7 +20,28 @@ function limitWords(text, maxWords = 120) {
 }
 
 function isSuccess(event) {
-  return event.terminal_outcome === "succeeded";
+  return ["succeeded", "success"].includes(event.terminal_outcome);
+}
+
+function toRecordId(value, fallbackTable = "learning_events") {
+  if (!value) {
+    return null;
+  }
+
+  if (typeof value === "object" && value.table && value.id !== undefined) {
+    return value;
+  }
+
+  const raw = String(value);
+  const separatorIndex = raw.indexOf(":");
+
+  if (separatorIndex === -1) {
+    return new RecordId(fallbackTable, raw);
+  }
+
+  const table = raw.slice(0, separatorIndex) || fallbackTable;
+  const id = raw.slice(separatorIndex + 1);
+  return new RecordId(table, id);
 }
 
 function sortOutcomes(events) {
@@ -47,12 +69,14 @@ function summarizeGuidance(events, { actionType, retryDomain, includeEnvironment
   const lines = [];
 
   if (successes.length) {
-    lines.push(`Recent ${retryDomain} recoveries for ${actionType}: ${successes.length}.`);
+    lines.push(`Recent successes for ${actionType}: ${successes.length}.`);
   }
 
   if (failures.length) {
     const recentFailure = failures[0];
-    lines.push(`Recent blocker: ${recentFailure.error_code || recentFailure.error_category || "unknown_error"}.`);
+    lines.push(
+      `Recent failure patterns: ${recentFailure.error_code || recentFailure.error_category || "unknown_error"}.`
+    );
   }
 
   if (includeEnvironmentConstraint) {
@@ -152,11 +176,13 @@ class LearningStore {
       return null;
     }
 
+    const attempt = toRecordId(attemptId);
+    const outcome = toRecordId(outcomeId);
     const edge = {
       thread_id: threadId,
       world_id: worldId,
       turn_id: turnId,
-      attempt_id: attemptId,
+      attempt_id: String(attempt),
       relation_type: relationType,
       timestamp
     };
@@ -164,8 +190,8 @@ class LearningStore {
     const [created] = await this.client.query(
       "RELATE $attempt->learning_edges->$outcome CONTENT $edge RETURN AFTER;",
       {
-        attempt: attemptId,
-        outcome: outcomeId,
+        attempt,
+        outcome,
         edge
       }
     );

@@ -27,11 +27,13 @@ function buildSignatureString(signature = {}) {
 
 const RETRY_TERMINAL_OUTCOMES = Object.freeze({
   SUCCEEDED: "succeeded",
+  SUCCESS: "success",
   FAILED: "failed",
   INTERRUPTED: "interrupted",
   SUPERSEDED: "superseded",
   ABANDONED: "abandoned",
   NON_RETRYABLE: "non_retryable",
+  LOOP_STOPPED: "loop_stopped"
 });
 
 const RETRY_STOP_REASONS = Object.freeze({

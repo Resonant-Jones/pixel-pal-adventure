@@ -96,7 +96,7 @@ class RetryCoordinator {
         return {
           ok: true,
           value: result.value,
-          terminalOutcome: RETRY_TERMINAL_OUTCOMES.SUCCEEDED,
+          terminalOutcome: RETRY_TERMINAL_OUTCOMES.SUCCESS,
           attempts: attemptIndex,
           history
         };
@@ -154,7 +154,7 @@ class RetryCoordinator {
       if (repeatCount >= this.loopThreshold) {
         return {
           ok: false,
-          terminalOutcome: RETRY_TERMINAL_OUTCOMES.FAILED,
+          terminalOutcome: RETRY_TERMINAL_OUTCOMES.LOOP_STOPPED,
           stopReason: RETRY_STOP_REASONS.LOOP_DETECTED,
           attempts: attemptIndex,
           signature,

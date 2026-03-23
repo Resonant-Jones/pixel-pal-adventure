@@ -16,8 +16,8 @@ DEFINE FIELD IF NOT EXISTS session_id ON TABLE events TYPE string;
 DEFINE FIELD IF NOT EXISTS type ON TABLE events TYPE string;
 DEFINE FIELD IF NOT EXISTS description ON TABLE events TYPE string;
 DEFINE FIELD IF NOT EXISTS actor ON TABLE events TYPE string;
-DEFINE FIELD IF NOT EXISTS location ON TABLE events TYPE object;
-DEFINE FIELD IF NOT EXISTS snapshot ON TABLE events TYPE object;
+DEFINE FIELD OVERWRITE location ON TABLE events TYPE option<object>;
+DEFINE FIELD OVERWRITE snapshot ON TABLE events TYPE option<object>;
 DEFINE FIELD IF NOT EXISTS metadata ON TABLE events TYPE object;
 DEFINE FIELD IF NOT EXISTS timestamp ON TABLE events TYPE string;
 DEFINE INDEX IF NOT EXISTS events_thread_world_timestamp ON TABLE events COLUMNS thread_id, world_id, timestamp;
@@ -174,7 +174,7 @@ DEFINE INDEX IF NOT EXISTS learning_events_signature_timestamp ON TABLE learning
 DEFINE INDEX IF NOT EXISTS learning_events_world_domain_timestamp ON TABLE learning_events COLUMNS world_id, retry_domain, timestamp;
 DEFINE INDEX IF NOT EXISTS learning_events_turn_attempt ON TABLE learning_events COLUMNS turn_id, attempt_id;
 
-DEFINE TABLE IF NOT EXISTS learning_edges SCHEMALESS;
+DEFINE TABLE OVERWRITE learning_edges TYPE RELATION IN learning_events OUT learning_events;
 DEFINE FIELD IF NOT EXISTS thread_id ON TABLE learning_edges TYPE string;
 DEFINE FIELD IF NOT EXISTS world_id ON TABLE learning_edges TYPE string;
 DEFINE FIELD IF NOT EXISTS turn_id ON TABLE learning_edges TYPE string;

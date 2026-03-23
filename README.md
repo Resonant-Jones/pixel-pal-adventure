@@ -1,217 +1,157 @@
 # Minecraft AI Companion
 
-Lightweight Minecraft Java companion for Sage, built around Mineflayer, SurrealDB, and an OpenAI-compatible LLM provider (MiniMax, Groq, or Ollama). The bot joins the world as a normal player, chats in-world, captures a lightweight world snapshot for context, and persists memory across restarts without vector infrastructure.
+Local-first Minecraft companion runtime built around Mineflayer, SurrealDB, and an OpenAI-compatible model provider. The bot joins as a normal player, observes chat and world state, replies in-world, remembers important events, and reconnects or retries without requiring a central coordinator.
 
-## What this build covers
+## What This Repo Is
 
-- Mineflayer bot login and in-world chat loop
-- LLM reasoning through the OpenAI-compatible chat endpoint
-- SurrealDB-backed message and event memory with timestamps
-- Recent-window memory retrieval for low-resource contextual replies
-- Periodic adventure memory distillation into compact `adventure_summary` events
-- World/session-aware persistence through `worlds`, `sessions`, `jobs`, and `reflex_state`
-- Database-driven reflexes for danger, discoveries, dusk, idleness, and remembered places without an LLM call
-- Lightweight world snapshots: player position, health, hunger, time of day, nearby entities, nearby blocks, focused player state
-- Structured actions: `follow_player`, `stop_following`, `move_to`, `look_at`, `chat`
-- Structured build/inventory actions: `compose_structure`, `build_structure`, `inventory_status`, `dig_block`, `place_block`
-- Direct Sage control commands: `follow me`, `stop following`, `build a cozy cabin`, `build a bridge`, `what do you have`, `what worked`
-- Deterministic `thread_id` scoping so memory survives restarts and can later map cleanly into Codexify
+The project has two faces:
 
-## Minimal Viable Network
+- `npm start` runs the headless agent runtime.
+- `dashboard/` contains the optional Tauri operator console that can launch and monitor the runtime locally.
 
-Nodes:
-- Sage's Minecraft client
-- Minecraft world host or LAN server
-- Guardian runtime (Node.js + Mineflayer)
-- Local or home-server SurrealDB
-- LLM API (MiniMax, Groq, or Ollama)
+Major pieces:
 
-Trust boundaries:
-- Device boundary: Sage client vs home server runtime
-- Network boundary: local Minecraft traffic vs outbound LLM API calls
-- Identity boundary: by default only `PRIMARY_PLAYER` is treated as the trusted primary speaker
-- Persistence boundary: SurrealDB is the source of truth for remembered messages and events
+- `scripts/startAgent.js` bootstraps config, storage, the bot adapter, the runtime, and the local control plane.
+- `agent/` owns turn execution, retries, reconnects, background workers, and runtime state.
+- `minecraft/` wraps Mineflayer and translates bot actions into protocol calls.
+- `ai/` wraps the model providers and prompt construction.
+- `memory/` persists messages, events, jobs, worlds, sessions, identity, and learning state in SurrealDB.
+- `builder/` turns natural build requests into structure plans and placement jobs.
+- `reflex/` classifies world events and emits automatic reflex jobs.
+- `control/` exposes the local HTTP/WebSocket control plane used by the dashboard.
+- `shared/contracts/` is the runtime/dashboard contract surface.
+- `structures/` holds structure templates and retry signature constants.
+- `schemas/` defines the SurrealDB schema and event triggers.
 
-Threat model for v1:
-- Designed for honest-but-buggy local components
-- Not hardened against malicious Minecraft players or a compromised host
-- Secrets stay in env vars; access control is enforced in code through player filtering, not prompt text
+## High-Level Flow
 
-## Resource posture
+```mermaid
+flowchart LR
+  Chat["Minecraft chat or world signal"] --> Runtime["AgentRuntime"]
+  Runtime --> Context["Context builder"]
+  Context --> Model["LLM provider"]
+  Model --> Action["Action executor"]
+  Action --> Bot["Minecraft bot adapter"]
+  Runtime --> Memory["SurrealDB stores"]
+  Memory --> Runtime
+  Runtime --> Control["Local control plane"]
+  Control --> Dashboard["Tauri dashboard"]
+```
 
-This implementation keeps retrieval simple:
-- message context is a recent window, not semantic search
-- event context is a small recent tail, not a heavy analytics pipeline
-- SurrealDB acts as event store, message memory, and lightweight graph substrate
+## Quick Start
 
-That keeps the system aligned with a modest iMac or Mac Mini setup.
-
-## Quick start
-
-1. Install dependencies:
+1. Install dependencies.
 
 ```bash
 npm install
 ```
 
-2. Start SurrealDB in a separate terminal with persistent on-disk storage:
+2. Start a local SurrealDB instance.
 
 ```bash
 npm run db:start
 ```
 
-This stores the local database under `.local/guardian-memory`.
+This stores local data under `.local/guardian-memory` and binds SurrealDB on `127.0.0.1:8000`.
 
-3. Copy `.env.example` to `.env` and set at least:
-- `LLM_PROVIDER` if you want Groq or Ollama (`minimax` is the default)
-- `MINIMAX_API_KEY` (MiniMax) or `GROQ_API_KEY` + `GROQ_BASE_URL` + `GROQ_MODEL` (Groq) or `OLLAMA_MODEL` (+ optional `OLLAMA_BASE_URL`)
-- `MC_HOST`
-- `MC_PORT`
-- `PRIMARY_PLAYER`
-- `MC_BOT_USERNAME`
+3. Copy `.env.example` to `.env` and set the Minecraft host plus one model provider.
 
-4. Start the agent:
+4. Start the runtime.
 
 ```bash
 npm start
 ```
 
-Optional readiness check:
+5. Optional: start the operator dashboard.
 
 ```bash
-npm run db:ready
+cd dashboard
+npm run tauri:dev
 ```
 
-## Core environment settings
+The dashboard uses the local control plane and can spawn the runtime for you.
 
-Minecraft:
-- `MC_HOST`, `MC_PORT`: server or LAN host to join
-- `MC_AUTH`: `offline` for local/LAN or `microsoft` for authenticated servers
-- `PRIMARY_PLAYER`: trusted primary user, defaults to `Sage`
-- `MC_PRIMARY_PLAYER`: legacy alias for `PRIMARY_PLAYER`
-- `MC_BOT_USERNAME`: in-game bot username, defaults to `Guardian`
-- `MC_THREAD_ID`: optional explicit memory scope override
+## Environment Overview
 
-LLM provider:
-- `LLM_PROVIDER`: `minimax` (default), `groq`, or `ollama`
+### Minecraft
 
-MiniMax:
-- `MINIMAX_API_KEY`
-- `MINIMAX_BASE_URL`: defaults to `https://api.minimax.io/v1`
-- `MINIMAX_MODEL`: defaults to `MiniMax-M2.5`
+- `MC_HOST`, `MC_PORT`: Minecraft server or LAN host.
+- `MC_VERSION`: optional Mineflayer protocol version override.
+- `MC_AUTH`: `offline` for local/LAN, `microsoft` for authenticated servers.
+- `PRIMARY_PLAYER` / `MC_PRIMARY_PLAYER`: trusted primary operator, default `Sage`.
+- `MC_BOT_USERNAME`: in-world bot username, default `Guardian`.
+- `COMPANION_ROLE`: prompt-facing role description for the companion.
+- `COMPANION_PERSONALITY`: prompt-facing personality description.
+- `MC_THREAD_ID`: optional manual memory scope.
+- `MC_RESPOND_TO_ALL`: widen response permission from the primary player to everyone.
+- `MC_FOLLOW_DISTANCE`: follow range used by pathing.
 
-Groq:
-- `GROQ_API_KEY`
-- `GROQ_BASE_URL`: defaults to `https://api.groq.com/openai/v1`
-- `GROQ_MODEL`: defaults to `qwen/qwen3-32b`
+### Model Provider
 
-Ollama:
-- `OLLAMA_BASE_URL`: defaults to `http://127.0.0.1:11434/v1`
-- `OLLAMA_MODEL`: local Ollama model name (required)
-- `OLLAMA_API_KEY`: optional, defaults to `ollama`
+- `LLM_PROVIDER`: `minimax` by default, or `groq` / `ollama`.
+- `MINIMAX_*`, `GROQ_*`, `OLLAMA_*`: provider endpoints, models, and timeouts.
+- Provider loaders also honor `OPENAI_API_KEY`, `OPENAI_BASE_URL`, and `OPENAI_MODEL` as compatibility aliases.
 
-SurrealDB:
-- `SURREAL_URL`: defaults to `http://127.0.0.1:8000`
-- `SURREAL_NAMESPACE`
-- `SURREAL_DATABASE`
-- `SURREAL_USERNAME`
-- `SURREAL_PASSWORD`
+### SurrealDB
 
-Runtime:
-- `AGENT_MEMORY_WINDOW`: recent message count, default `12`
-- `AGENT_EVENT_WINDOW`: recent event count, default `6`
-- `AGENT_SUMMARY_INTERVAL`: observed chat messages between summary jobs, default `24`
-- `AGENT_SUMMARY_WINDOW`: recent message window used for distillation, default `24`
-- `AGENT_SUMMARY_CONTEXT_LIMIT`: number of stored summaries injected into future context, default `3`
-- `AGENT_MAX_PENDING_TURNS`: queued chat turns before backpressure, default `4`
-- `AGENT_REFLEX_INTERVAL_MS`: observation cadence for reflex classification, default `5000`
-- `AGENT_REFLEX_WORKER_INTERVAL_MS`: polling interval for pending reflex jobs, default `1000`
-- `AGENT_BUILD_WORKER_INTERVAL_MS`: polling interval for pending build jobs, default `1000`
-- `AGENT_REFLEX_GLOBAL_COOLDOWN_MS`: minimum time between any reflex chats, default `60000`
-- `AGENT_REFLEX_TRIGGER_COOLDOWN_MS`: minimum time between reflexes of the same type, default `180000`
-- `AGENT_REFLEX_IDLE_THRESHOLD_MS`: idle threshold before `player_idle`, default `90000`
-- `ALLOW_AUTO_GIVE_BUILD_MATERIALS`: in creative mode, let Guardian issue `/give Guardian ...` for missing build materials, default `false`
-- `AGENT_BUILD_DEBUG`: log compiled build plans and material bills, default `false`
-- `AGENT_RETRY_MAX_ATTEMPTS`: max per-turn attempts, default `3`
-- `AGENT_RETRY_BASE_DELAY_MS`: retry backoff base delay, default `500`
-- `AGENT_RETRY_MAX_DELAY_MS`: retry backoff max delay, default `5000`
-- `AGENT_RETRY_JITTER`: retry backoff jitter, default `0.25`
-- `AGENT_RETRY_GRAPH_FROM_ATTEMPT`: attempt index to inject retry guidance, default `2`
-- `AGENT_RETRY_LOOP_THRESHOLD`: repeated failure threshold before stopping, default `3`
+- `SURREAL_URL`: defaults to `http://127.0.0.1:8000`.
+- `SURREAL_NAMESPACE`, `SURREAL_DATABASE`: database target.
+- `SURREAL_USERNAME`, `SURREAL_PASSWORD`: authentication.
+- `SURREAL_CONNECT_TIMEOUT_MS`: connection timeout.
 
-Reconnect:
-- `MC_RECONNECT_MAX_ATTEMPTS`: reconnect attempts before giving up, default `5`
-- `MC_RECONNECT_BASE_DELAY_MS`: reconnect backoff base delay, default `1000`
-- `MC_RECONNECT_MAX_DELAY_MS`: reconnect backoff max delay, default `15000`
-- `MC_RECONNECT_JITTER`: reconnect jitter, default `0.25`
+### Runtime / Memory / Retry
 
-## Data model
+- `AGENT_MEMORY_WINDOW`, `AGENT_EVENT_WINDOW`: recent context windows.
+- `AGENT_SUMMARY_INTERVAL`, `AGENT_SUMMARY_WINDOW`, `AGENT_SUMMARY_CONTEXT_LIMIT`: adventure summary cadence and injection depth.
+- `AGENT_MAX_PENDING_TURNS`: backpressure cap for queued chat turns.
+- `AGENT_REFLEX_INTERVAL_MS`, `AGENT_REFLEX_WORKER_INTERVAL_MS`, `AGENT_BUILD_WORKER_INTERVAL_MS`: background worker cadence.
+- `AGENT_REFLEX_GLOBAL_COOLDOWN_MS`, `AGENT_REFLEX_TRIGGER_COOLDOWN_MS`, `AGENT_REFLEX_IDLE_THRESHOLD_MS`: reflex throttles.
+- `ALLOW_AUTO_GIVE_BUILD_MATERIALS`: lets build jobs auto-provision materials in creative mode.
+- `AGENT_BUILD_DEBUG`: logs compiled build plans.
+- `AGENT_RETRY_MAX_ATTEMPTS`, `AGENT_RETRY_BASE_DELAY_MS`, `AGENT_RETRY_MAX_DELAY_MS`, `AGENT_RETRY_JITTER`, `AGENT_RETRY_GRAPH_FROM_ATTEMPT`, `AGENT_RETRY_LOOP_THRESHOLD`: per-turn retry policy.
+- `MC_RECONNECT_MAX_ATTEMPTS`, `MC_RECONNECT_BASE_DELAY_MS`, `MC_RECONNECT_MAX_DELAY_MS`, `MC_RECONNECT_JITTER`: Minecraft reconnect policy.
 
-Tables:
-- `worlds`: current world identity and last-seen metadata
-- `sessions`: per-run session lifecycle for the active world
-- `messages`: `thread_id`, `world_id`, `session_id`, `speaker`, `content`, `source`, `timestamp`, `metadata`
-- `events`: `thread_id`, `world_id`, `session_id`, `type`, `description`, `location`, `actor`, `timestamp`, `snapshot`, `metadata`
-- `characters`: companion identity and personality metadata
-- `jobs`: queued deterministic reflex work
-- `reflex_state`: cooldown tracking for automatic reflex chat
+## Normal Startup Signals
 
-The runtime stores user chat, bot replies, world/session lifecycle events, reflex detections, reflex-triggered chat, and periodic `adventure_summary` distillations. Retrieval is intentionally recent-window based, with recent reflex history and the last few summaries injected as compact long-term memory.
+When the system is healthy, you should see:
 
-Build composition:
-- natural build requests are interpreted into `compose_structure`
-- the compiler expands that into geometry primitives and a bill of materials
-- a background build worker turns those into deterministic placement jobs
-- supported v1 styles: `cabin`, `hut`, `tower`, `bridge`, `camp`
+- SurrealDB connected and schema bootstrapped.
+- The Mineflayer bot spawned into the world.
+- A `session_start`, `world_entered`, and `spawn` event in the event store.
+- Runtime state marked `ready` with `connectionHealth=healthy`.
+- The dashboard showing a live event stream if it is connected.
 
-## Runtime flow
+## Troubleshooting At A Glance
 
-```text
-Minecraft chat
-  -> store inbound message
-  -> capture world snapshot
-  -> classify reflex events and let Surreal create reflex jobs
-  -> execute pending reflex jobs without an LLM call
-  -> load recent messages + recent events
-  -> call LLM provider
-  -> execute action
-  -> store reply and action event
-```
+- Minecraft says the connection is refused: verify `MC_HOST`, `MC_PORT`, and that the server is actually listening.
+- The bot keeps reconnecting: inspect `agent/agentRuntime.js`, `minecraft/bot.js`, and the reconnect settings in `.env`.
+- Nothing is being remembered: check `memory/surrealClient.js`, the SurrealDB process, and `schemas/surrealSchema.surql`.
+- Model responses are malformed: check `ai/*Client.js`, `ai/promptBuilder.js`, and the selected `LLM_PROVIDER`.
 
-## Failure modes and mitigations
+## Deeper Docs
 
-1. LLM latency or bursty chat
-   Mitigation: turns are serialized and capped with a small queue to avoid runaway overlap.
+- [Code map](documents/documentation/CODEMAP.md)
+- [System overview](documents/documentation/architecture/system-overview.md)
+- [Runtime lifecycle](documents/documentation/architecture/runtime-lifecycle.md)
+- [Data flow](documents/documentation/architecture/data-flow.md)
+- [State and identity](documents/documentation/architecture/state-and-identity.md)
+- [Runtime components](documents/documentation/infrastructure/runtime-components.md)
+- [Persistence](documents/documentation/infrastructure/persistence.md)
+- [Networking and connectivity](documents/documentation/infrastructure/networking-and-connectivity.md)
+- [Configuration](documents/documentation/infrastructure/configuration.md)
+- [Operator guide](documents/documentation/operator/operator-guide.md)
+- [Troubleshooting runbook](documents/documentation/operator/runbook-troubleshooting.md)
+- [Maintenance and observability](documents/documentation/operator/maintenance-and-observability.md)
 
-2. SurrealDB unavailable
-   Mitigation: startup fails early instead of silently running without persistence.
+## Project Shape
 
-3. Player not visible for a movement action
-   Mitigation: the action layer throws, the turn is logged, and the bot sends a fallback reply.
+The runtime is intentionally split so each layer owns one concern:
 
-4. Minecraft disconnects
-   Mitigation: session lifecycle events are recorded and shutdown is graceful.
+- `agent/` decides what happens next.
+- `memory/` stores what happened.
+- `minecraft/` performs Minecraft protocol actions.
+- `ai/` turns prompts into structured replies.
+- `builder/` compiles structure jobs.
+- `reflex/` emits automatic responses when the world changes.
 
-5. World state drift between prompt and action
-   Mitigation: movement actions are lightweight and non-blocking; later hardening can add revalidation before high-impact actions.
-
-## Deployment notes
-
-Local mode:
-- Minecraft client and agent on Sage's machine
-- SurrealDB local to the same machine
-
-Home server mode:
-- Minecraft server, agent, and SurrealDB on Mac Mini
-- Sage joins from iMac client
-- Set `MC_HOST` to the server address and keep `SURREAL_URL` local to the runtime host
-
-## Codexify path
-
-The runtime is intentionally modular:
-- `minecraft/` handles protocol edges
-- `memory/` owns persistence
-- `ai/` owns LLM prompting and parsing
-- `agent/` owns orchestration and action execution
-
-That gives a clean seam to later replace the prompt/runtime layer with Codexify while preserving the Minecraft edge and Surreal memory model.
+That separation keeps the system debuggable and makes it easier to swap the model or dashboard without redesigning the runtime.
