@@ -15,6 +15,7 @@ class ReflexWorker {
     getWorldContext,
     globalCooldownMs = 60000,
     perTriggerCooldownMs = 180000,
+    getReflexPolicy = () => ({ enabled: true, highSalienceOnly: false }),
     logger = console
   }) {
     this.botAdapter = botAdapter;
@@ -26,8 +27,14 @@ class ReflexWorker {
     this.getWorldContext = getWorldContext;
     this.globalCooldownMs = globalCooldownMs;
     this.perTriggerCooldownMs = perTriggerCooldownMs;
+    this.getReflexPolicy = getReflexPolicy;
     this.logger = logger;
     this.running = false;
+  }
+
+  isHighSalience(job) {
+    const reflexType = job?.payload?.reflex_type || "";
+    return ["creeper_nearby", "mob_nearby", "player_health_low"].includes(reflexType);
   }
 
   async runOnce() {
@@ -49,6 +56,25 @@ class ReflexWorker {
 
     try {
       await this.jobStore.markRunning(job.id);
+
+      const policy = this.getReflexPolicy();
+      if (!policy?.enabled) {
+        await this.jobStore.completeJob(job.id, {
+          suppressed: true,
+          reason: "narrative_reflex_disabled"
+        });
+        await this.markObserved(job, context.worldId);
+        return true;
+      }
+
+      if (policy?.highSalienceOnly && !this.isHighSalience(job)) {
+        await this.jobStore.completeJob(job.id, {
+          suppressed: true,
+          reason: "low_salience"
+        });
+        await this.markObserved(job, context.worldId);
+        return true;
+      }
 
       const suppressed = await this.shouldSuppress(job, context.worldId);
       if (suppressed) {
