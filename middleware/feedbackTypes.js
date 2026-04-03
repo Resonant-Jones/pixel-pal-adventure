@@ -1,0 +1,25 @@
+const FEEDBACK_TYPES = {
+  BUILD_PROGRESS: "build_progress",
+  THREAT_ALERT: "threat_alert",
+  INTENT_SIGNAL: "intent_signal",
+  NARRATIVE_REFLEX: "narrative_reflex",
+  STUCK_DIAGNOSIS: "stuck_diagnosis",
+  MEMORY_ECHO: "memory_echo"
+};
+
+const FEEDBACK_PRIORITIES = ["low", "medium", "high", "critical"];
+
+const DEFAULT_COOLDOWN_SECONDS = {
+  [FEEDBACK_TYPES.BUILD_PROGRESS]: 20,
+  [FEEDBACK_TYPES.THREAT_ALERT]: 15,
+  [FEEDBACK_TYPES.INTENT_SIGNAL]: 0,
+  [FEEDBACK_TYPES.NARRATIVE_REFLEX]: 90,
+  [FEEDBACK_TYPES.STUCK_DIAGNOSIS]: 30,
+  [FEEDBACK_TYPES.MEMORY_ECHO]: 180
+};
+
+module.exports = {
+  FEEDBACK_TYPES,
+  FEEDBACK_PRIORITIES,
+  DEFAULT_COOLDOWN_SECONDS
+};

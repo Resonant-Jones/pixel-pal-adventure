@@ -41,6 +41,10 @@ function createRuntimeState({
       behaviorMode: "balanced",
       toolPermissions: "standard",
       followDistance: Number(minecraft.followDistance || 2),
+      buildMode: "hybrid",
+      narrativeReflexEnabled: false,
+      highSalienceOnly: true,
+      allowMutationDuringBuild: false,
       childFriendlyUi: {
         kidModeEnabled: true,
         largeTextEnabled: true,
@@ -88,6 +92,7 @@ function createRuntimeState({
       loopDetected: false,
       lastOutcome: null
     },
+    buildStatus: null,
     reconnectState: {
       status: "idle",
       attemptCount: 0,

@@ -113,8 +113,49 @@ function normalizeAction(action) {
   return { ...action, type };
 }
 
+const ALLOWED_ACTION_TYPES = new Set([
+  "none",
+  "chat",
+  "follow_player",
+  "stop_following",
+  "move_to",
+  "look_at",
+  "compose_structure",
+  "build_structure",
+  "inventory_status",
+  "inspect_build_site",
+  "plan_build",
+  "clear_footprint",
+  "place_block",
+  "break_block",
+  "continue_build_phase",
+  "repair_failed_step",
+  "gather_materials",
+  "explain_build_plan",
+  "finalize_build",
+  "start_emergent_build"
+]);
+
+function sanitizeAction(action) {
+  const normalized = normalizeAction(action);
+  if (!ALLOWED_ACTION_TYPES.has(normalized.type)) {
+    return { type: "none" };
+  }
+
+  return normalized;
+}
+
 function normalizeStructuredResponse(parsed, raw) {
-  const action = normalizeAction(parsed.action);
+  if (!parsed || typeof parsed !== "object") {
+    return {
+      message: "",
+      action: { type: "none" },
+      raw,
+      parseMode: "rejected"
+    };
+  }
+
+  const action = sanitizeAction(parsed.action);
   if (action.target === undefined && parsed.target !== undefined) {
     action.target = parsed.target;
   }
@@ -143,6 +184,7 @@ function normalizeStructuredResponse(parsed, raw) {
   return {
     message,
     action,
+    task: parsed.task && typeof parsed.task === "object" ? parsed.task : null,
     raw,
     parseMode: "structured"
   };
@@ -183,7 +225,7 @@ function parseStructuredResponse(content) {
         message: "",
         action: { type: "none" },
         raw: content,
-        parseMode: "suppressed_structured_leak"
+        parseMode: "rejected"
       };
     }
 

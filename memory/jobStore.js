@@ -71,7 +71,7 @@ class JobStore {
     }
 
     const [selected] = await this.client.query(
-      'SELECT * FROM jobs WHERE world_id = $worldId AND type = "build_structure" AND status INSIDE ["pending", "paused"] ORDER BY created_at ASC LIMIT 20;',
+      'SELECT * FROM jobs WHERE world_id = $worldId AND type INSIDE ["build_structure", "build_emergent"] AND status INSIDE ["pending", "paused"] ORDER BY created_at ASC LIMIT 20;',
       {
         worldId
       }
@@ -95,6 +95,21 @@ class JobStore {
           return String(left.created_at || "").localeCompare(String(right.created_at || ""));
         })[0] || null
     );
+  }
+
+  async getActiveBuildJob(worldId) {
+    if (!worldId) {
+      return null;
+    }
+
+    const [selected] = await this.client.query(
+      'SELECT * FROM jobs WHERE world_id = $worldId AND type INSIDE ["build_structure", "build_emergent"] AND status INSIDE ["running", "paused", "pending"] ORDER BY updated_at DESC LIMIT 1;',
+      {
+        worldId
+      }
+    );
+
+    return getStatementRows(selected)[0] || null;
   }
 
   async updateJob(jobId, patch = {}) {

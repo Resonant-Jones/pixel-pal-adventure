@@ -7,6 +7,9 @@ const { createRuntimeState, createTaskState, updateRuntimeState } = require("./r
 const { resolveWorldIdentity } = require("../reflex/worldIdentity");
 const { StateProjector } = require("./stateProjector");
 const { BuildWorker } = require("../builder/buildWorker");
+const { FeedbackBroker } = require("../middleware/feedbackBroker");
+const { analyzeIntent } = require("./intentCoach");
+const { routeBuildLane } = require("./buildLaneRouter");
 const { RetryCoordinator } = require("./retryCoordinator");
 const { buildIdentityPromptProfile, resolveIdentityPreset } = require("./identityPresets");
 const { buildNormalizedFailureSignature, classifyConnectionError } = require("./retrySignatures");
@@ -142,6 +145,7 @@ class AgentRuntime {
     this.allowAutoGiveBuildMaterials = allowAutoGiveBuildMaterials;
     this.debugBuildPlans = debugBuildPlans;
     this.logger = logger;
+    this.feedbackBroker = new FeedbackBroker({ logger });
     this.bound = false;
     this.readyForTurns = false;
     this.observedChatCount = 0;
@@ -228,6 +232,10 @@ class AgentRuntime {
       getWorldContext: () => this.getWorldContext(),
       globalCooldownMs: this.reflexGlobalCooldownMs,
       perTriggerCooldownMs: this.reflexTriggerCooldownMs,
+      getReflexPolicy: () => ({
+        enabled: Boolean(this.runtimeState.liveConfig.narrativeReflexEnabled),
+        highSalienceOnly: Boolean(this.runtimeState.liveConfig.highSalienceOnly)
+      }),
       logger: this.logger
     });
 
@@ -690,6 +698,34 @@ class AgentRuntime {
       if (patch.liveConfig.toolPermissions !== undefined) {
         updateLiveField("toolPermissions", patch.liveConfig.toolPermissions, (value) => {
           nextLiveConfig.toolPermissions = String(value);
+        });
+      }
+
+      if (patch.liveConfig.buildMode !== undefined) {
+        updateLiveField("buildMode", patch.liveConfig.buildMode, (value) => {
+          const normalized = String(value);
+          if (!["template_only", "hybrid", "emergent_only"].includes(normalized)) {
+            throw new Error("buildMode must be template_only, hybrid, or emergent_only.");
+          }
+          nextLiveConfig.buildMode = normalized;
+        });
+      }
+
+      if (patch.liveConfig.narrativeReflexEnabled !== undefined) {
+        updateLiveField("narrativeReflexEnabled", patch.liveConfig.narrativeReflexEnabled, (value) => {
+          nextLiveConfig.narrativeReflexEnabled = Boolean(value);
+        });
+      }
+
+      if (patch.liveConfig.highSalienceOnly !== undefined) {
+        updateLiveField("highSalienceOnly", patch.liveConfig.highSalienceOnly, (value) => {
+          nextLiveConfig.highSalienceOnly = Boolean(value);
+        });
+      }
+
+      if (patch.liveConfig.allowMutationDuringBuild !== undefined) {
+        updateLiveField("allowMutationDuringBuild", patch.liveConfig.allowMutationDuringBuild, (value) => {
+          nextLiveConfig.allowMutationDuringBuild = Boolean(value);
         });
       }
 
@@ -1531,6 +1567,60 @@ class AgentRuntime {
     return payload.username === this.primaryPlayer || payload.directMention;
   }
 
+  async getActiveBuildStatus(worldId) {
+    if (!this.jobStore || !worldId) {
+      return null;
+    }
+
+    const job = await this.jobStore.getActiveBuildJob(worldId);
+    if (!job) {
+      return null;
+    }
+
+    return {
+      active: ["running", "paused", "pending"].includes(job.status),
+      jobId: String(job.id),
+      lane: job.type === "build_emergent" ? "emergent" : "template",
+      progress: job.progress || 0,
+      feedbackSummary: job.payload?.feedback_summary || null,
+      designReadiness: job.payload?.design_readiness || null
+    };
+  }
+
+  buildFeedbackPackets({ intentSignal, buildStatus } = {}) {
+    const packets = [];
+
+    if (intentSignal?.needsClarification) {
+      packets.push({
+        type: "intent_signal",
+        priority: "medium",
+        source: "chat",
+        summary: intentSignal.summary || "Intent needs clarification.",
+        diagnostic_code: intentSignal.diagnostic_code || null,
+        speakable_summary: intentSignal.suggestedQuestion || null,
+        cooldown_seconds: 0,
+        metadata: {}
+      });
+    }
+
+    if (buildStatus?.feedbackSummary) {
+      packets.push({
+        type: "build_progress",
+        priority: "low",
+        source: "build",
+        summary: buildStatus.feedbackSummary,
+        cooldown_seconds: 20,
+        metadata: {
+          jobId: buildStatus.jobId,
+          lane: buildStatus.lane,
+          progress: buildStatus.progress
+        }
+      });
+    }
+
+    return packets;
+  }
+
   getDirectCommand(payload) {
     if (payload?.username !== this.primaryPlayer) {
       return null;
@@ -1576,14 +1666,6 @@ class AgentRuntime {
     if (normalized === "what worked" || normalized === "what works") {
       return {
         type: "what_worked"
-      };
-    }
-
-    const parsedBuild = parseBuildRequest(payload.message, this.primaryPlayer);
-    if (parsedBuild) {
-      return {
-        message: "",
-        action: parsedBuild
       };
     }
 
@@ -1750,6 +1832,100 @@ class AgentRuntime {
         });
         return;
       }
+
+      const intentSignal = analyzeIntent(payload.message, this.primaryPlayer);
+      const buildStatus = await this.getActiveBuildStatus(worldContext.worldId);
+      if (buildStatus) {
+        this.setRuntimeState({
+          buildStatus: {
+            jobId: buildStatus.jobId || null,
+            lane: buildStatus.lane || null,
+            progress: Number.isFinite(Number(buildStatus.progress)) ? Number(buildStatus.progress) : null,
+            feedbackSummary: buildStatus.feedbackSummary || null,
+            designReadiness: buildStatus.designReadiness || null
+          }
+        });
+      }
+      const feedbackPackets = this.buildFeedbackPackets({
+        intentSignal,
+        buildStatus
+      });
+      const feedbackSummaries = this.feedbackBroker.collectSummaries({
+        packets: feedbackPackets
+      });
+      const laneDecision = routeBuildLane({
+        message: payload.message,
+        intentSignal,
+        buildStatus,
+        buildMode: this.runtimeState.liveConfig.buildMode || "hybrid",
+        mutationPolicy: {
+          allowMutationDuringBuild: Boolean(this.runtimeState.liveConfig.allowMutationDuringBuild)
+        }
+      });
+
+      if (laneDecision?.readiness) {
+        this.setRuntimeState({
+          buildStatus: {
+            ...(this.runtimeState.buildStatus || {
+              jobId: null,
+              lane: null,
+              progress: null,
+              feedbackSummary: null,
+              designReadiness: null
+            }),
+            designReadiness: laneDecision.readiness
+          }
+        });
+      }
+
+      if (laneDecision?.clarification) {
+        const reply = {
+          message: laneDecision.clarification,
+          action: { type: "none" },
+          task: {
+            summary: "Clarification requested before build.",
+            diagnostic_code: laneDecision.reason || "clarification_required",
+            recommended_next_step: "clarify_request"
+          }
+        };
+        const execution = await this.actionExecutor.execute(reply);
+        await this.storeCompanionResponse({
+          reply,
+          execution,
+          snapshot: observedSnapshot,
+          eventType: "clarification_requested",
+          metadata: {
+            trigger: "lane_router",
+            laneDecision
+          }
+        });
+        this.completeTurnTask(turnId);
+        return;
+      }
+
+      const parsedBuild = parseBuildRequest(payload.message, this.primaryPlayer);
+      if (parsedBuild && laneDecision?.buildLane === "template") {
+        const reply = {
+          message: "",
+          action: parsedBuild
+        };
+        const execution = await this.actionExecutor.execute(reply);
+        await this.storeCompanionResponse({
+          reply,
+          execution,
+          snapshot: observedSnapshot,
+          eventType: "direct_command_executed",
+          metadata: {
+            trigger: "lane_router",
+            laneDecision
+          }
+        });
+        this.completeTurnTask(turnId);
+        return;
+      }
+
+      const feedbackSummary =
+        laneDecision?.lane === "task" ? feedbackSummaries.taskSummary : feedbackSummaries.socialSummary;
     const createSuccessSignature = ({ retryDomain, actionType, provider, operationSubtype }) =>
       createNormalizedFailureSignature({
         retryDomain,
@@ -1888,7 +2064,8 @@ class AgentRuntime {
             memoryWindow: this.memoryWindow,
             eventWindow: this.eventWindow,
             summaryContextLimit: this.summaryContextLimit,
-            retryGuidance: guidance || null
+            retryGuidance: guidance || null,
+            feedbackSummary
           });
         } catch (error) {
           const signature = buildNormalizedFailureSignature({
@@ -1995,7 +2172,7 @@ class AgentRuntime {
           };
         }
 
-        if (!execution.messageSent && reply.parseMode === "suppressed_structured_leak") {
+        if (!execution.messageSent && (reply.parseMode === "suppressed_structured_leak" || reply.parseMode === "rejected")) {
           await this.botAdapter.say("I got a little tangled. Ask me again.");
           execution.messageSent = true;
           execution.fallbackMessage = "I got a little tangled. Ask me again.";
@@ -2156,6 +2333,7 @@ class AgentRuntime {
       source: "minecraft",
       metadata: {
         action: reply.action,
+        task: reply.task || null,
         execution,
         snapshot,
         ...metadata
@@ -2173,6 +2351,7 @@ class AgentRuntime {
       snapshot,
       metadata: {
         action: reply.action,
+        task: reply.task || null,
         execution,
         ...metadata
       }

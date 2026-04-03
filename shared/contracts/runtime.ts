@@ -90,6 +90,14 @@ export interface LearningEventSummary {
   summary: string;
 }
 
+export interface BuildStatusSummary {
+  jobId: string | null;
+  lane: "template" | "emergent" | null;
+  progress: number | null;
+  feedbackSummary: string | null;
+  designReadiness: "not_executable" | "ready" | null;
+}
+
 export interface RuntimeState {
   lifecycle: RuntimeLifecycleState;
   world: WorldSessionState;
@@ -105,6 +113,7 @@ export interface RuntimeState {
   connectionHealth: ConnectionHealth;
   revisions: RuntimeConfigRevisions;
   latestLearningSummary: LearningEventSummary | null;
+  buildStatus: BuildStatusSummary | null;
   lastSequence: number;
   updatedAt: string;
 }

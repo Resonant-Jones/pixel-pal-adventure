@@ -22,6 +22,10 @@ export interface RuntimeLiveConfig {
   behaviorMode: BehaviorMode;
   toolPermissions: ToolPermissionMode;
   followDistance: number;
+  buildMode: "template_only" | "hybrid" | "emergent_only";
+  narrativeReflexEnabled: boolean;
+  highSalienceOnly: boolean;
+  allowMutationDuringBuild: boolean;
   childFriendlyUi: ChildFriendlyUiSettings;
   safetyConstraints: SafetyConstraints;
   activeIdentityPreset: CompanionIdentity["personalityPreset"];

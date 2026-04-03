@@ -64,11 +64,16 @@ Rules:
 - Never claim to perceive something that is not in the provided world snapshot.
 - If an action is unsafe or impossible, explain that in the message and use action type "none".
 
-Return ONLY valid JSON with this shape:
+Return JSON with this shape when possible:
 {
   "message": "short in-game reply",
+  "task": {
+    "summary": "short internal diagnostic",
+    "diagnostic_code": "OPTIONAL_CODE",
+    "recommended_next_step": "OPTIONAL_STEP"
+  },
   "action": {
-    "type": "none" | "follow_player" | "stop_following" | "move_to" | "look_at" | "chat" | "compose_structure" | "inventory_status",
+    "type": "none" | "follow_player" | "stop_following" | "move_to" | "look_at" | "chat" | "compose_structure" | "inventory_status" | "inspect_build_site" | "plan_build" | "clear_footprint" | "place_block" | "break_block" | "continue_build_phase" | "repair_failed_step" | "gather_materials" | "explain_build_plan" | "finalize_build" | "start_emergent_build",
     "player": "${primaryPlayer}",
     "target": {"x": 0, "y": 64, "z": 0},
     "style": "cabin" | "hut" | "tower" | "bridge" | "camp",
@@ -98,10 +103,14 @@ function buildUserPrompt({
   recentReflexEvents,
   worldSnapshot,
   playerState,
-  retryGuidance
+  retryGuidance,
+  feedbackSummary = null
 }) {
   const guidanceSection = retryGuidance
     ? `Retry guidance:\n${retryGuidance}\n\n`
+    : "";
+  const feedbackSection = feedbackSummary
+    ? `Feedback summary:\n${feedbackSummary}\n\n`
     : "";
 
   return `Latest player message:
@@ -119,13 +128,13 @@ ${formatAdventureSummaries(recentSummaries)}
 Recent reflexes:
 ${formatRecentReflexes(recentReflexEvents)}
 
-${guidanceSection}Current world snapshot:
+${guidanceSection}${feedbackSection}Current world snapshot:
 ${formatWorldSnapshot(worldSnapshot)}
 
 Focused player state:
 ${JSON.stringify(playerState, null, 2)}
 
-Respond with JSON only.`;
+Respond with JSON only when possible.`;
 }
 
 function buildAdventureSummarySystemPrompt({
