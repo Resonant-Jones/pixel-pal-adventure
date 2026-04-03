@@ -125,6 +125,11 @@ function detectFeatures(text, style) {
 function parseBuildRequest(message, primaryPlayer = "Sage") {
   const text = normalizeText(message);
   const hasStructureCue = /\b(bridge|tower|camp|hut|cabin|house|home|shelter|base)\b/.test(text);
+  const hasTemplateCue = /\b(template|blueprint|prebuilt|quick build)\b/.test(text);
+
+  if (!hasTemplateCue) {
+    return null;
+  }
 
   if (!/\b(build|construct)\b/.test(text) && !(/\bmake\b/.test(text) && hasStructureCue)) {
     return null;

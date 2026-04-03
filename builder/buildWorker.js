@@ -1,4 +1,6 @@
 const { expandPrimitives } = require("./primitiveExecutor");
+const { evaluateBuildProgress, buildFeedbackPacket } = require("./buildFeedback");
+const { inspectFootprint } = require("./siteInspector");
 
 function materialRequirements(materials = {}) {
   return Object.entries(materials).map(([item, count]) => ({ item, count }));
@@ -111,6 +113,17 @@ class BuildWorker {
       return;
     }
 
+    const siteInspection = inspectFootprint(this.botAdapter, origin, placementPlan.footprint);
+    if (!siteInspection.ok) {
+      await this.botAdapter.say("That spot is too cluttered for the build.");
+      await this.jobStore.failJob(job.id, {
+        message: "Build site rejected.",
+        diagnostic_code: "SITE_OBSTRUCTED",
+        inspection: siteInspection
+      });
+      return;
+    }
+
     if (this.debugBuildPlans) {
       this.logger.info("[build] Plan", {
         jobId: String(job.id),
@@ -169,12 +182,28 @@ class BuildWorker {
       }
 
       if (index === startIndex || index % 8 === 0 || index === expanded.placements.length - 1) {
+        const progress = evaluateBuildProgress({
+          botAdapter: this.botAdapter,
+          origin,
+          placements: expanded.placements
+        });
+        const feedbackPacket = buildFeedbackPacket(progress);
+
         await this.jobStore.updateJob(job.id, {
           progress: percentage(index + 1, expanded.placements.length),
           payload: {
             ...job.payload,
             origin,
-            current_index: index + 1
+            current_index: index + 1,
+            design_readiness: job.payload?.design_readiness || "ready",
+            feedback_summary: feedbackPacket?.summary || null,
+            feedback_packet: feedbackPacket || null,
+            progress_marker: {
+              completion_percent: progress.completion_percent,
+              missing_blocks_count: progress.missing_blocks_count,
+              wrong_blocks_count: progress.wrong_blocks_count,
+              last_meaningful_progress_at: progress.last_meaningful_progress_at
+            }
           }
         });
       }
