@@ -1,7 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
 import { KidMode } from "./components/KidMode";
 import { BuilderMode } from "./components/BuilderMode";
+import { SettingsPanel } from "./components/SettingsPanel";
+import { PreflightLaunch } from "./components/PreflightLaunch";
 import { runtimeStore } from "./store/runtimeStore";
+import { shellSettingsStore } from "./store/shellSettingsStore";
 
 function buildCommandId(prefix: string) {
   return `${prefix}-${crypto.randomUUID()}`;
@@ -9,35 +12,152 @@ function buildCommandId(prefix: string) {
 
 export function App() {
   const [, forceRender] = useState(0);
-  const [whatWorkedSummary, setWhatWorkedSummary] = useState<string | null>(null);
+  const [launching, setLaunching] = useState(false);
+  const [showPreflight, setShowPreflight] = useState(true);
+  const [launchError, setLaunchError] = useState<string | null>(null);
 
-  useEffect(() => runtimeStore.subscribe(() => forceRender((value) => value + 1)), []);
   useEffect(() => {
-    void runtimeStore.bootstrapRuntime();
+    const unsubShell = shellSettingsStore.subscribe(() => forceRender((v) => v + 1));
+    const unsubRuntime = runtimeStore.subscribe(() => forceRender((v) => v + 1));
+
+    void shellSettingsStore.loadSettings();
+    void shellSettingsStore.loadSecrets();
+    void shellSettingsStore.getRuntimeStatus();
+
+    return () => {
+      unsubShell();
+      unsubRuntime();
+    };
   }, []);
 
-  const state = runtimeStore.getState();
-  const runtimeState = state.runtimeState;
-  const identity = runtimeState?.identity;
-  const activeMode = state.mode;
+  const shellState = shellSettingsStore.getState();
+  const runtimeState = runtimeStore.getState();
+  const identity = runtimeState.runtimeState?.identity;
+  const activeMode = runtimeState.mode;
+  const runtimeRunning = shellState.runtimeStatus.running;
 
   const connectionBanner = useMemo(() => {
-    if (state.connectionStatus === "degraded") {
+    if (runtimeState.connectionStatus === "degraded") {
       return "Connection looks shaky. Trying to reconnect.";
     }
 
-    if (state.connectionStatus === "error") {
-      return state.error || "The dashboard hit an error.";
+    if (runtimeState.connectionStatus === "error") {
+      return runtimeState.error || "The dashboard hit an error.";
     }
 
     return null;
-  }, [state.connectionStatus, state.error]);
+  }, [runtimeState.connectionStatus, runtimeState.error]);
+
+  const handleLaunch = async (profileId: string | null) => {
+    setLaunchError(null);
+    setLaunching(true);
+    try {
+      await shellSettingsStore.startRuntime(profileId || undefined);
+      const bootstrap = await runtimeStore.bootstrapRuntimeWithShell(profileId);
+      setShowPreflight(false);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setLaunchError(message);
+      console.error("Launch failed:", error);
+    } finally {
+      setLaunching(false);
+    }
+  };
+
+  const handleOpenSettings = () => {
+    shellSettingsStore.openSettingsPanel();
+  };
+
+  const handleCloseSettings = () => {
+    shellSettingsStore.closeSettingsPanel();
+  };
+
+  const handleSaveSettings = async (manifest: typeof shellState.manifest) => {
+    if (!manifest) return;
+    await shellSettingsStore.saveSettings(manifest);
+  };
+
+  const handleSaveSecrets = async (secrets: typeof shellState.secrets) => {
+    if (!secrets) return;
+    await shellSettingsStore.saveSecrets(secrets);
+  };
+
+  const handleRestartNow = async (profileId: string | null) => {
+    await shellSettingsStore.restartRuntime(profileId || undefined);
+    shellSettingsStore.clearPendingRestart();
+  };
+
+  const handleRestartLater = () => {
+    shellSettingsStore.clearPendingRestart();
+  };
+
+  if (shellState.settingsPanelOpen && shellState.manifest) {
+    return (
+      <SettingsPanel
+        manifest={shellState.manifest}
+        secrets={shellState.secrets}
+        validation={shellState.validation}
+        mergedFrom={shellState.mergedFrom}
+        runtimeRunning={runtimeRunning}
+        onSave={handleSaveSettings}
+        onSaveSecrets={handleSaveSecrets}
+        onClose={handleCloseSettings}
+        onRestartNow={handleRestartNow}
+        onRestartLater={handleRestartLater}
+        pendingRestart={shellState.pendingRestart}
+      />
+    );
+  }
+
+  if (showPreflight && !runtimeRunning) {
+    return (
+      <main className="app-shell">
+        <aside className="sidebar">
+          <p className="eyebrow">Guardian Console Alpha</p>
+          <h1>{shellState.manifest?.baseSettings.companionName || "Guardian"}</h1>
+          <p className="sidebar-copy">
+            Settings-first Guardian Shell. Configure your settings below and launch when ready.
+          </p>
+
+          <div className="mode-switch">
+            <button className="secondary" onClick={() => runtimeStore.setMode("kid")}>
+              Kid Mode
+            </button>
+            <button className="secondary" onClick={() => runtimeStore.setMode("builder")}>
+              Builder Mode
+            </button>
+          </div>
+
+          <div className="status-pill">
+            <span>offline</span>
+            <span>not running</span>
+          </div>
+        </aside>
+
+        <section className="content">
+          <PreflightLaunch
+            manifest={shellState.manifest}
+            secrets={shellState.secrets}
+            validation={shellState.validation}
+            runtimeStatus={shellState.runtimeStatus}
+            settingsLoaded={shellState.settingsLoaded}
+            settingsError={shellState.settingsError}
+            launchError={launchError}
+            mergedFrom={shellState.mergedFrom}
+            onLaunch={handleLaunch}
+            onOpenSettings={handleOpenSettings}
+            launching={launching}
+          />
+        </section>
+      </main>
+    );
+  }
 
   return (
     <main className="app-shell">
       <aside className="sidebar">
         <p className="eyebrow">Guardian Console Alpha</p>
-        <h1>{identity?.displayName || "Guardian"}</h1>
+        <h1>{identity?.displayName || shellState.manifest?.baseSettings.companionName || "Guardian"}</h1>
         <p className="sidebar-copy">
           Local-first control for the Minecraft runtime, with Kid Mode for simple tasks and Builder Mode for debugging.
         </p>
@@ -52,9 +172,29 @@ export function App() {
         </div>
 
         <div className="status-pill">
-          <span>{state.connectionStatus}</span>
-          <span>{runtimeState?.world.worldId || "no world"}</span>
+          <span>{runtimeState.connectionStatus}</span>
+          <span>{runtimeState.runtimeState?.world.worldId || "no world"}</span>
         </div>
+
+        <div className="sidebar-actions">
+          <button className="secondary" onClick={handleOpenSettings}>
+            Settings
+          </button>
+          {runtimeRunning && (
+            <button className="secondary" onClick={() => void shellSettingsStore.stopRuntime()}>
+              Stop Runtime
+            </button>
+          )}
+        </div>
+
+        {shellState.pendingRestart && (
+          <div className="banner">
+            <p>Restart needed</p>
+            <button className="primary" onClick={() => handleRestartNow(shellState.pendingRestartProfileId)}>
+              Restart Now
+            </button>
+          </div>
+        )}
       </aside>
 
       <section className="content">
@@ -62,8 +202,8 @@ export function App() {
 
         {activeMode === "kid" ? (
           <KidMode
-            runtimeState={runtimeState}
-            friendlyFeed={state.friendlyFeed}
+            runtimeState={runtimeState.runtimeState}
+            friendlyFeed={runtimeState.friendlyFeed}
             onRename={(name) =>
               void runtimeStore.patchConfig({
                 identity: {
@@ -119,8 +259,8 @@ export function App() {
                 commandId: buildCommandId("task"),
                 timestamp: new Date().toISOString(),
                 taskText,
-                requestedBy: runtimeState?.staticConfig.primaryPlayer || "Sage",
-                anchorId: runtimeState?.activeAnchor?.id || null
+                requestedBy: runtimeState.runtimeState?.staticConfig.primaryPlayer || "Sage",
+                anchorId: runtimeState.runtimeState?.activeAnchor?.id || null
               })
             }
             onStop={() =>
@@ -164,12 +304,12 @@ export function App() {
           />
         ) : (
           <BuilderMode
-            runtimeState={runtimeState}
-            rawEvents={state.rawEvents}
-            whatWorkedSummary={whatWorkedSummary}
+            runtimeState={runtimeState.runtimeState}
+            rawEvents={runtimeState.rawEvents}
+            whatWorkedSummary={null}
             onRefreshWhatWorked={() => {
               void runtimeStore.refreshWhatWorked().then((result) => {
-                setWhatWorkedSummary(result?.summary || null);
+                // Handle what worked result
               });
             }}
             onApplyProfile={(profileId) =>

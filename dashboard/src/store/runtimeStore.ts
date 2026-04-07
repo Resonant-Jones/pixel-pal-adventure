@@ -68,6 +68,28 @@ class RuntimeStore {
     this.connectEvents(bootstrap);
   }
 
+  async bootstrapRuntimeWithShell(profileId?: string | null) {
+    this.setState({ connectionStatus: "connecting", error: null });
+    const bootstrap = await invoke<{
+      host: string;
+      port: number;
+      token: string;
+      status: string;
+      profile_id: string | null;
+      profile_name: string | null;
+    }>("start_runtime", { profileId: profileId || null });
+    const runtimeBootstrap: RuntimeBootstrap = {
+      host: bootstrap.host,
+      port: bootstrap.port,
+      token: bootstrap.token,
+      status: bootstrap.status as "starting" | "running"
+    };
+    await waitForRuntimeReady(runtimeBootstrap);
+    const snapshot = await getRuntimeSnapshot(runtimeBootstrap);
+    this.applySnapshot(snapshot, runtimeBootstrap);
+    this.connectEvents(runtimeBootstrap);
+  }
+
   private applySnapshot(snapshot: RuntimeSnapshot, bootstrap = this.state.bootstrap) {
     this.setState({
       bootstrap: bootstrap || null,

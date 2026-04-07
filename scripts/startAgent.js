@@ -27,6 +27,7 @@ const { SessionStore } = require("../memory/sessionStore");
 const { SurrealClient } = require("../memory/surrealClient");
 const { WorldStore } = require("../memory/worldStore");
 const { MinecraftBotAdapter } = require("../minecraft/bot");
+const { loadOrCreateManifest, resolveEffectiveSettings } = require("./loadSettingsManifest");
 
 function parseNumber(value, fallback) {
   const parsed = Number(value);
@@ -82,58 +83,55 @@ function buildLlmClient(env = process.env) {
   throw new Error(`Unsupported LLM_PROVIDER "${provider}". Use "minimax", "groq", or "ollama".`);
 }
 
-function buildRuntimeConfig(env = process.env) {
-  const primaryPlayer = env.PRIMARY_PLAYER || env.MC_PRIMARY_PLAYER || "Sage";
-  const companionName = env.MC_BOT_USERNAME || env.COMPANION_NAME || "Guardian";
-  const host = env.MC_HOST || "127.0.0.1";
-  const port = parseNumber(env.MC_PORT, 25565);
+function buildRuntimeConfig(effectiveSettings, env = process.env) {
+  const host = effectiveSettings.minecraft.host;
+  const port = effectiveSettings.minecraft.port;
+  const primaryPlayer = effectiveSettings.primaryPlayer;
 
   return {
     primaryPlayer,
-    companionName,
-    companionRole: env.COMPANION_ROLE || "AI companion for Sage",
-    companionPersonality:
-      env.COMPANION_PERSONALITY ||
-      "Warm, observant, concise, practical, and grounded in the Minecraft world.",
+    companionName: effectiveSettings.companionName,
+    companionRole: effectiveSettings.companionRole,
+    companionPersonality: effectiveSettings.companionPersonality,
     threadId:
       env.MC_THREAD_ID || `minecraft:${host}:${port}:${primaryPlayer.toLowerCase().replace(/\s+/g, "-")}`,
-    memoryWindow: parseNumber(env.AGENT_MEMORY_WINDOW, 12),
-    eventWindow: parseNumber(env.AGENT_EVENT_WINDOW, 6),
-    summaryInterval: parseNumber(env.AGENT_SUMMARY_INTERVAL, 24),
-    summaryWindow: parseNumber(env.AGENT_SUMMARY_WINDOW, 24),
-    summaryContextLimit: parseNumber(env.AGENT_SUMMARY_CONTEXT_LIMIT, 3),
-    maxPendingTurns: parseNumber(env.AGENT_MAX_PENDING_TURNS, 4),
-    reflexObservationIntervalMs: parseNumber(env.AGENT_REFLEX_INTERVAL_MS, 5000),
-    reflexWorkerIntervalMs: parseNumber(env.AGENT_REFLEX_WORKER_INTERVAL_MS, 1000),
-    buildWorkerIntervalMs: parseNumber(env.AGENT_BUILD_WORKER_INTERVAL_MS, 1000),
-    reflexGlobalCooldownMs: parseNumber(env.AGENT_REFLEX_GLOBAL_COOLDOWN_MS, 60000),
-    reflexTriggerCooldownMs: parseNumber(env.AGENT_REFLEX_TRIGGER_COOLDOWN_MS, 180000),
-    reflexIdleThresholdMs: parseNumber(env.AGENT_REFLEX_IDLE_THRESHOLD_MS, 90000),
-    allowAutoGiveBuildMaterials: parseBoolean(env.ALLOW_AUTO_GIVE_BUILD_MATERIALS, false),
-    debugBuildPlans: parseBoolean(env.AGENT_BUILD_DEBUG, false),
-    respondToAllPlayers: parseBoolean(env.MC_RESPOND_TO_ALL, false),
+    memoryWindow: effectiveSettings.agent.memoryWindow,
+    eventWindow: effectiveSettings.agent.eventWindow,
+    summaryInterval: effectiveSettings.agent.summaryInterval,
+    summaryWindow: effectiveSettings.agent.summaryWindow,
+    summaryContextLimit: effectiveSettings.agent.summaryContextLimit,
+    maxPendingTurns: effectiveSettings.agent.maxPendingTurns,
+    reflexObservationIntervalMs: effectiveSettings.agent.reflexObservationIntervalMs,
+    reflexWorkerIntervalMs: effectiveSettings.agent.reflexWorkerIntervalMs,
+    buildWorkerIntervalMs: effectiveSettings.agent.buildWorkerIntervalMs,
+    reflexGlobalCooldownMs: effectiveSettings.agent.reflexGlobalCooldownMs,
+    reflexTriggerCooldownMs: effectiveSettings.agent.reflexTriggerCooldownMs,
+    reflexIdleThresholdMs: effectiveSettings.agent.reflexIdleThresholdMs,
+    allowAutoGiveBuildMaterials: effectiveSettings.agent.allowAutoGiveBuildMaterials,
+    debugBuildPlans: effectiveSettings.agent.debugBuildPlans,
+    respondToAllPlayers: effectiveSettings.minecraft.respondToAllPlayers,
     minecraft: {
       host,
       port,
-      username: companionName,
-      version: env.MC_VERSION || undefined,
-      auth: env.MC_AUTH || "offline",
+      username: effectiveSettings.companionName,
+      version: effectiveSettings.minecraft.version,
+      auth: effectiveSettings.minecraft.auth,
       primaryPlayer,
-      followDistance: parseNumber(env.MC_FOLLOW_DISTANCE, 2)
+      followDistance: effectiveSettings.minecraft.followDistance
     },
     retry: {
-      maxAttempts: parseNumber(env.AGENT_RETRY_MAX_ATTEMPTS, 3),
-      baseDelayMs: parseNumber(env.AGENT_RETRY_BASE_DELAY_MS, 500),
-      maxDelayMs: parseNumber(env.AGENT_RETRY_MAX_DELAY_MS, 5000),
-      jitter: parseNumber(env.AGENT_RETRY_JITTER, 0.25),
-      graphFromAttempt: parseNumber(env.AGENT_RETRY_GRAPH_FROM_ATTEMPT, 2),
-      loopThreshold: parseNumber(env.AGENT_RETRY_LOOP_THRESHOLD, 3)
+      maxAttempts: effectiveSettings.retry.maxAttempts,
+      baseDelayMs: effectiveSettings.retry.baseDelayMs,
+      maxDelayMs: effectiveSettings.retry.maxDelayMs,
+      jitter: effectiveSettings.retry.jitter,
+      graphFromAttempt: effectiveSettings.retry.graphFromAttempt,
+      loopThreshold: effectiveSettings.retry.loopThreshold
     },
     reconnect: {
-      maxAttempts: parseNumber(env.MC_RECONNECT_MAX_ATTEMPTS, 5),
-      baseDelayMs: parseNumber(env.MC_RECONNECT_BASE_DELAY_MS, 1000),
-      maxDelayMs: parseNumber(env.MC_RECONNECT_MAX_DELAY_MS, 15000),
-      jitter: parseNumber(env.MC_RECONNECT_JITTER, 0.25)
+      maxAttempts: effectiveSettings.reconnect.maxAttempts,
+      baseDelayMs: effectiveSettings.reconnect.baseDelayMs,
+      maxDelayMs: effectiveSettings.reconnect.maxDelayMs,
+      jitter: effectiveSettings.reconnect.jitter
     },
     controlPlane: {
       host: env.GUARDIAN_CONTROL_HOST || "127.0.0.1",
@@ -144,7 +142,14 @@ function buildRuntimeConfig(env = process.env) {
 }
 
 async function main() {
-  const runtimeConfig = buildRuntimeConfig();
+  const manifest = loadOrCreateManifest();
+  const requestedProfileId = process.env.GUARDIAN_PROFILE || null;
+  const effectiveSettings = resolveEffectiveSettings(manifest, requestedProfileId);
+
+  console.log(`[settings] Using profile: ${effectiveSettings.activeProfileName || effectiveSettings.activeProfileId}`);
+  console.log(`[settings] Merged from: ${effectiveSettings.mergedFrom.join(" -> ")}`);
+
+  const runtimeConfig = buildRuntimeConfig(effectiveSettings);
   process.env.GUARDIAN_CONTROL_HOST = runtimeConfig.controlPlane.host;
   process.env.GUARDIAN_CONTROL_PORT = String(runtimeConfig.controlPlane.port);
   process.env.GUARDIAN_CONTROL_TOKEN = runtimeConfig.controlPlane.token;
