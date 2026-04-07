@@ -61,6 +61,7 @@ DEFINE FIELD IF NOT EXISTS created_at ON TABLE jobs TYPE string;
 DEFINE FIELD IF NOT EXISTS updated_at ON TABLE jobs TYPE string;
 DEFINE FIELD IF NOT EXISTS started_at ON TABLE jobs TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS completed_at ON TABLE jobs TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS resume_at ON TABLE jobs TYPE option<string>;
 DEFINE FIELD OVERWRITE result ON TABLE jobs TYPE option<object>;
 DEFINE FIELD OVERWRITE error ON TABLE jobs TYPE option<object>;
 DEFINE INDEX IF NOT EXISTS jobs_world_status_created ON TABLE jobs COLUMNS world_id, status, created_at;

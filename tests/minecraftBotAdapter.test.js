@@ -1,6 +1,31 @@
 const assert = require("assert");
 
-const { MinecraftBotAdapter } = require("../minecraft/bot");
+const { MinecraftBotAdapter, resolveSupportedMinecraftVersion } = require("../minecraft/bot");
+
+function testConfiguredVersionResolvesWhenSupported() {
+  const resolvedVersion = resolveSupportedMinecraftVersion({
+    configuredVersion: "1.21.11"
+  });
+
+  assert.strictEqual(resolvedVersion, "1.21.11");
+}
+
+function testUnsupportedServerVersionThrowsHelpfulError() {
+  assert.throws(
+    () =>
+      resolveSupportedMinecraftVersion({
+        serverVersionName: "26.1.1",
+        protocolVersion: 775
+      }),
+    (error) => {
+      assert.strictEqual(error.code, "unsupported_minecraft_version");
+      assert.strictEqual(error.serverVersionName, "26.1.1");
+      assert.strictEqual(error.protocolVersion, 775);
+      assert.deepStrictEqual(error.candidates, ["26.1"]);
+      return true;
+    }
+  );
+}
 
 async function testDisconnectUsesEnd() {
   let endMessage = null;
@@ -42,6 +67,8 @@ async function testDisconnectUsesEnd() {
 }
 
 Promise.resolve()
+  .then(testConfiguredVersionResolvesWhenSupported)
+  .then(testUnsupportedServerVersionThrowsHelpfulError)
   .then(testDisconnectUsesEnd)
   .then(() => {
     console.log("minecraftBotAdapter tests passed");

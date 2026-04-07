@@ -1578,7 +1578,8 @@ class AgentRuntime {
     }
 
     return {
-      active: ["running", "paused", "pending"].includes(job.status),
+      active: job.status === "running",
+      state: job.status,
       jobId: String(job.id),
       lane: job.type === "build_emergent" ? "emergent" : "template",
       progress: job.progress || 0,
@@ -1840,6 +1841,7 @@ class AgentRuntime {
           buildStatus: {
             jobId: buildStatus.jobId || null,
             lane: buildStatus.lane || null,
+            state: buildStatus.state || null,
             progress: Number.isFinite(Number(buildStatus.progress)) ? Number(buildStatus.progress) : null,
             feedbackSummary: buildStatus.feedbackSummary || null,
             designReadiness: buildStatus.designReadiness || null
@@ -1869,6 +1871,7 @@ class AgentRuntime {
             ...(this.runtimeState.buildStatus || {
               jobId: null,
               lane: null,
+              state: null,
               progress: null,
               feedbackSummary: null,
               designReadiness: null

@@ -2,6 +2,10 @@ const { expandPrimitives } = require("./primitiveExecutor");
 const { evaluateBuildProgress, buildFeedbackPacket } = require("./buildFeedback");
 const { inspectFootprint } = require("./siteInspector");
 
+const BUILD_SITE_RETRY_DELAY_MS = 30000;
+const BUILD_BLOCKED_RETRY_DELAY_MS = 30000;
+const BUILD_MATERIAL_RETRY_DELAY_MS = 120000;
+
 function materialRequirements(materials = {}) {
   return Object.entries(materials).map(([item, count]) => ({ item, count }));
 }
@@ -22,6 +26,10 @@ function formatMissingMaterials(missing, commands = []) {
 
   const commandText = commands.slice(0, 2).join(" then ");
   return `I need ${summary}. Try ${commandText}`;
+}
+
+function toIso(value = new Date()) {
+  return value instanceof Date ? value.toISOString() : new Date(value).toISOString();
 }
 
 class BuildWorker {
@@ -83,10 +91,15 @@ class BuildWorker {
   }
 
   async executeJob(job, context) {
+    if (typeof this.botAdapter.stopPathing === "function") {
+      this.botAdapter.stopPathing();
+    }
+
     const plan = job.payload?.plan;
     if (!plan?.primitives?.length) {
       await this.jobStore.failJob(job.id, {
-        message: "Build job is missing a compiled plan."
+        message: "Build job is missing a compiled plan.",
+        diagnostic_code: "MISSING_PLAN"
       });
       return;
     }
@@ -107,20 +120,50 @@ class BuildWorker {
 
     if (!origin) {
       await this.botAdapter.say("I couldn't find a clear place nearby to build that.");
-      await this.jobStore.failJob(job.id, {
-        message: "No valid build site found."
-      });
+      await this.jobStore.pauseJob(
+        job.id,
+        {
+          message: "No valid build site found.",
+          diagnostic_code: "NO_BUILD_SITE"
+        },
+        toIso(Date.now() + BUILD_SITE_RETRY_DELAY_MS),
+        {
+          payload: {
+            ...job.payload,
+            design_readiness: job.payload?.design_readiness || "not_executable",
+            last_failure: {
+              diagnostic_code: "NO_BUILD_SITE",
+              message: "No valid build site found."
+            }
+          }
+        }
+      );
       return;
     }
 
     const siteInspection = inspectFootprint(this.botAdapter, origin, placementPlan.footprint);
     if (!siteInspection.ok) {
       await this.botAdapter.say("That spot is too cluttered for the build.");
-      await this.jobStore.failJob(job.id, {
-        message: "Build site rejected.",
-        diagnostic_code: "SITE_OBSTRUCTED",
-        inspection: siteInspection
-      });
+      await this.jobStore.pauseJob(
+        job.id,
+        {
+          message: "Build site rejected.",
+          diagnostic_code: "SITE_OBSTRUCTED",
+          inspection: siteInspection
+        },
+        toIso(Date.now() + BUILD_SITE_RETRY_DELAY_MS),
+        {
+          payload: {
+            ...job.payload,
+            origin,
+            design_readiness: job.payload?.design_readiness || "not_executable",
+            last_failure: {
+              diagnostic_code: "SITE_OBSTRUCTED",
+              message: "Build site rejected."
+            }
+          }
+        }
+      );
       return;
     }
 
@@ -150,11 +193,28 @@ class BuildWorker {
 
       if (missing.length) {
         await this.botAdapter.say(formatMissingMaterials(missing, provision.commands));
-        await this.jobStore.failJob(job.id, {
-          message: "Missing materials.",
-          missing,
-          commands: provision.commands
-        });
+        await this.jobStore.pauseJob(
+          job.id,
+          {
+            message: "Missing materials.",
+            diagnostic_code: "MISSING_MATERIALS",
+            missing,
+            commands: provision.commands
+          },
+          toIso(Date.now() + BUILD_MATERIAL_RETRY_DELAY_MS),
+          {
+            payload: {
+              ...job.payload,
+              origin,
+              design_readiness: job.payload?.design_readiness || "ready",
+              last_failure: {
+                diagnostic_code: "MISSING_MATERIALS",
+                message: "Missing materials.",
+                missing
+              }
+            }
+          }
+        );
         return;
       }
     }
@@ -173,11 +233,31 @@ class BuildWorker {
 
       if (result.status === "needs_materials" || result.status === "blocked") {
         await this.botAdapter.say(result.message || "I got stuck while building.");
-        await this.jobStore.failJob(job.id, {
-          message: result.message || "Blocked during build.",
-          placement: absolute,
-          current_index: index
-        });
+        await this.jobStore.pauseJob(
+          job.id,
+          {
+            message: result.message || "Blocked during build.",
+            diagnostic_code: result.status === "needs_materials" ? "MISSING_MATERIALS" : "BLOCKED_PLACEMENT",
+            placement: absolute,
+            current_index: index
+          },
+          toIso(Date.now() + (result.status === "needs_materials" ? BUILD_MATERIAL_RETRY_DELAY_MS : BUILD_BLOCKED_RETRY_DELAY_MS)),
+          {
+            payload: {
+              ...job.payload,
+              origin,
+              current_index: index,
+              design_readiness: job.payload?.design_readiness || "ready",
+              last_failure: {
+                diagnostic_code:
+                  result.status === "needs_materials" ? "MISSING_MATERIALS" : "BLOCKED_PLACEMENT",
+                message: result.message || "Blocked during build.",
+                placement: absolute,
+                current_index: index
+              }
+            }
+          }
+        );
         return;
       }
 

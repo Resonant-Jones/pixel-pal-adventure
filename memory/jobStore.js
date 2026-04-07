@@ -78,6 +78,7 @@ class JobStore {
     );
 
     const jobs = getStatementRows(selected);
+    const now = Date.now();
     const priority = {
       paused: 0,
       pending: 1
@@ -85,6 +86,22 @@ class JobStore {
 
     return (
       jobs
+        .filter((job) => {
+          if (job.status === "pending") {
+            return true;
+          }
+
+          if (job.status === "paused") {
+            if (!job.resume_at) {
+              return true;
+            }
+
+            const resumeAt = Date.parse(job.resume_at);
+            return Number.isFinite(resumeAt) ? resumeAt <= now : false;
+          }
+
+          return false;
+        })
         .slice()
         .sort((left, right) => {
           const statusDelta = (priority[left.status] || 99) - (priority[right.status] || 99);
@@ -139,6 +156,22 @@ class JobStore {
     return getStatementRows(updated)[0] || null;
   }
 
+  async pauseJob(jobId, error = {}, resumeAt = toIso(), patch = {}) {
+    const updatedAt = toIso();
+    const [updated] = await this.client.query("UPDATE $jobId MERGE $patch RETURN AFTER;", {
+      jobId,
+      patch: {
+        ...patch,
+        status: "paused",
+        error,
+        resume_at: resumeAt,
+        updated_at: updatedAt
+      }
+    });
+
+    return getStatementRows(updated)[0] || null;
+  }
+
   async failJob(jobId, error = {}, completedAt = toIso()) {
     const [updated] = await this.client.query(
       "UPDATE $jobId MERGE { status: 'failed', error: $error, completed_at: $completedAt, updated_at: $completedAt } RETURN AFTER;",
@@ -158,7 +191,7 @@ class JobStore {
     }
 
     const [updated] = await this.client.query(
-      "UPDATE jobs SET status = 'paused', updated_at = $updatedAt WHERE world_id = $worldId AND status = 'running' RETURN AFTER;",
+      "UPDATE jobs SET status = 'paused', resume_at = $updatedAt, updated_at = $updatedAt WHERE world_id = $worldId AND status = 'running' RETURN AFTER;",
       {
         worldId,
         updatedAt

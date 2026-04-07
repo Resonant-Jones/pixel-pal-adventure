@@ -93,6 +93,7 @@ export interface LearningEventSummary {
 export interface BuildStatusSummary {
   jobId: string | null;
   lane: "template" | "emergent" | null;
+  state: "running" | "paused" | "pending" | "completed" | "failed" | null;
   progress: number | null;
   feedbackSummary: string | null;
   designReadiness: "not_executable" | "ready" | null;

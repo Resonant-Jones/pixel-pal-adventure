@@ -148,8 +148,12 @@ class ActionExecutor {
           throw new Error("move_to action requires x, y, and z coordinates.");
         }
 
-        await this.botAdapter.moveTo(coordinates);
+        const result = await this.botAdapter.moveTo(coordinates);
         execution.actionTarget = coordinates;
+        execution.move = result;
+        if (result?.message) {
+          message = sanitizeChat(result.message);
+        }
         break;
       }
 

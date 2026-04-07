@@ -1,11 +1,123 @@
 const { EventEmitter } = require("events");
 
+const minecraftData = require("minecraft-data");
+const ping = require("minecraft-protocol/src/ping");
 const mineflayer = require("mineflayer");
 const { pathfinder, Movements, goals } = require("mineflayer-pathfinder");
 
 const { captureWorldSnapshot } = require("./worldSnapshot");
 
 const { GoalBlock, GoalFollow, GoalNear } = goals;
+
+function normalizeMinecraftVersion(version) {
+  if (version === undefined || version === null || version === "") {
+    return undefined;
+  }
+
+  return String(version).trim();
+}
+
+function getMinecraftDataVersion(version) {
+  const normalizedVersion = normalizeMinecraftVersion(version);
+
+  if (!normalizedVersion) {
+    return null;
+  }
+
+  try {
+    const versionData = minecraftData(normalizedVersion);
+    return versionData?.version?.minecraftVersion || null;
+  } catch (error) {
+    return null;
+  }
+}
+
+function getVersionCandidates(serverVersionName, protocolVersion) {
+  const candidates = [];
+  const pushCandidate = (candidate) => {
+    if (!candidate?.minecraftVersion) {
+      return;
+    }
+
+    if (!candidates.some((entry) => entry.minecraftVersion === candidate.minecraftVersion)) {
+      candidates.push(candidate);
+    }
+  };
+
+  const versionsByProtocol =
+    minecraftData.postNettyVersionsByProtocolVersion?.pc?.[protocolVersion] || [];
+
+  for (const candidate of versionsByProtocol) {
+    pushCandidate(candidate);
+  }
+
+  const guessedVersions = [serverVersionName]
+    .concat(String(serverVersionName || "").match(/((\d+\.)+\d+)/g) || [])
+    .map((version) => minecraftData.versionsByMinecraftVersion?.pc?.[version])
+    .filter(Boolean)
+    .sort((left, right) => right.version - left.version);
+
+  for (const candidate of guessedVersions) {
+    pushCandidate(candidate);
+  }
+
+  return candidates;
+}
+
+function resolveSupportedMinecraftVersion({
+  configuredVersion,
+  serverVersionName,
+  protocolVersion
+}) {
+  const normalizedConfiguredVersion = normalizeMinecraftVersion(configuredVersion);
+
+  if (normalizedConfiguredVersion) {
+    const supportedConfiguredVersion = getMinecraftDataVersion(normalizedConfiguredVersion);
+
+    if (!supportedConfiguredVersion) {
+      const error = new Error(
+        `Configured MC_VERSION "${normalizedConfiguredVersion}" is not supported by the installed minecraft-data package.`
+      );
+      error.code = "unsupported_minecraft_version";
+      error.configuredVersion = normalizedConfiguredVersion;
+      throw error;
+    }
+
+    return supportedConfiguredVersion;
+  }
+
+  const candidates = getVersionCandidates(serverVersionName, protocolVersion);
+
+  for (const candidate of candidates) {
+    const supportedVersion = getMinecraftDataVersion(candidate.minecraftVersion);
+
+    if (supportedVersion) {
+      return supportedVersion;
+    }
+  }
+
+  const error = new Error(
+    `Installed Prismarine data does not support Minecraft server version "${serverVersionName}" (protocol ${protocolVersion}).`
+  );
+  error.code = "unsupported_minecraft_version";
+  error.serverVersionName = serverVersionName;
+  error.protocolVersion = protocolVersion;
+  error.candidates = candidates.map((candidate) => candidate.minecraftVersion);
+  throw error;
+}
+
+function pingServer({ host, port }) {
+  return new Promise((resolve, reject) => {
+    ping({ host, port }, (error, response) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+
+      resolve(response);
+    });
+  });
+}
 
 function escapeRegex(text) {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -16,6 +128,14 @@ function sanitizeChat(text) {
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, 200);
+}
+
+function createOperationTimeoutError(operationName, timeoutMs) {
+  const error = new Error(`Operation ${operationName} timed out after ${timeoutMs}ms.`);
+  error.code = "operation_timeout";
+  error.operation = operationName;
+  error.timeoutMs = timeoutMs;
+  return error;
 }
 
 function normalizeBlockPosition(position) {
@@ -129,6 +249,43 @@ class MinecraftBotAdapter extends EventEmitter {
     this.logger = logger;
     this.bot = null;
     this.movements = null;
+    this.botOperationQueue = Promise.resolve();
+    this.activeBotOperation = null;
+  }
+
+  async #runWithTimeout(operationName, operation, timeoutMs) {
+    let timeoutId = null;
+    const timeoutPromise = new Promise((_, reject) => {
+      timeoutId = setTimeout(() => {
+        this.stopPathing();
+        reject(createOperationTimeoutError(operationName, timeoutMs));
+      }, timeoutMs);
+    });
+
+    try {
+      return await Promise.race([Promise.resolve().then(operation), timeoutPromise]);
+    } finally {
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
+    }
+  }
+
+  async #withBotOperation(operationName, operation, timeoutMs = 60000) {
+    const run = async () => {
+      const previousOperation = this.activeBotOperation;
+      this.activeBotOperation = operationName;
+
+      try {
+        return await this.#runWithTimeout(operationName, operation, timeoutMs);
+      } finally {
+        this.activeBotOperation = previousOperation;
+      }
+    };
+
+    const queued = this.botOperationQueue.then(run, run);
+    this.botOperationQueue = queued.catch(() => {});
+    return queued;
   }
 
   async connect() {
@@ -136,13 +293,29 @@ class MinecraftBotAdapter extends EventEmitter {
       return this.bot;
     }
 
+    const serverInfo = await pingServer({
+      host: this.config.host,
+      port: this.config.port
+    });
+    const resolvedVersion = resolveSupportedMinecraftVersion({
+      configuredVersion: this.config.version,
+      serverVersionName: serverInfo?.version?.name,
+      protocolVersion: serverInfo?.version?.protocol
+    });
+
+    this.logger.info(
+      `[minecraft] Resolved ${this.config.host}:${this.config.port} version ${serverInfo?.version?.name || "unknown"} (protocol ${
+        serverInfo?.version?.protocol ?? "unknown"
+      }) to Mineflayer profile ${resolvedVersion}`
+    );
+
     return new Promise((resolve, reject) => {
       let settled = false;
       const bot = mineflayer.createBot({
         host: this.config.host,
         port: this.config.port,
         username: this.config.username,
-        version: this.config.version || undefined,
+        version: resolvedVersion,
         auth: this.config.auth || "offline"
       });
 
@@ -294,14 +467,23 @@ class MinecraftBotAdapter extends EventEmitter {
       throw new Error("Bot is not connected.");
     }
 
-    const entity = this.getPlayerEntity(username);
+    const perform = async () => {
+      const entity = this.getPlayerEntity(username);
 
-    if (!entity) {
-      throw new Error(`Player ${username} is not visible to the bot.`);
+      if (!entity) {
+        throw new Error(`Player ${username} is not visible to the bot.`);
+      }
+
+      this.stopPathing();
+      this.bot.pathfinder.setMovements(this.movements || new Movements(this.bot));
+      this.bot.pathfinder.setGoal(new GoalFollow(entity, this.config.followDistance || 2), true);
+    };
+
+    if (this.activeBotOperation) {
+      return this.#runWithTimeout("follow_player", perform, 5000);
     }
 
-    this.bot.pathfinder.setMovements(this.movements || new Movements(this.bot));
-    this.bot.pathfinder.setGoal(new GoalFollow(entity, this.config.followDistance || 2), true);
+    return this.#withBotOperation("follow_player", perform, 5000);
   }
 
   async stopFollowing() {
@@ -309,7 +491,23 @@ class MinecraftBotAdapter extends EventEmitter {
       throw new Error("Bot is not connected.");
     }
 
-    this.stopPathing();
+    if (this.activeBotOperation) {
+      return this.#runWithTimeout(
+        "stop_following",
+        async () => {
+          this.stopPathing();
+        },
+        5000
+      );
+    }
+
+    return this.#withBotOperation(
+      "stop_following",
+      async () => {
+        this.stopPathing();
+      },
+      5000
+    );
   }
 
   async moveTo(position) {
@@ -317,14 +515,37 @@ class MinecraftBotAdapter extends EventEmitter {
       throw new Error("Bot is not connected.");
     }
 
-    const target = normalizeBlockPosition(position);
+    const perform = async () => {
+      const target = normalizeBlockPosition(position);
 
-    if (!target) {
-      throw new Error("Invalid move_to coordinates.");
+      if (!target) {
+        throw new Error("Invalid move_to coordinates.");
+      }
+
+      this.bot.pathfinder.setMovements(this.movements || new Movements(this.bot));
+      this.stopPathing();
+
+      try {
+        await this.bot.pathfinder.goto(new GoalBlock(target.x, target.y, target.z));
+        return {
+          status: "arrived",
+          position: target
+        };
+      } catch (error) {
+        this.stopPathing();
+        return {
+          status: "blocked",
+          position: target,
+          message: `I couldn't reach ${target.x}, ${target.y}, ${target.z} right now.`
+        };
+      }
+    };
+
+    if (this.activeBotOperation) {
+      return this.#runWithTimeout("move_to", perform, 15000);
     }
 
-    this.bot.pathfinder.setMovements(this.movements || new Movements(this.bot));
-    this.bot.pathfinder.setGoal(new GoalBlock(target.x, target.y, target.z), false);
+    return this.#withBotOperation("move_to", perform, 15000);
   }
 
   async goNear(position, range = 3) {
@@ -332,13 +553,36 @@ class MinecraftBotAdapter extends EventEmitter {
       throw new Error("Bot is not connected.");
     }
 
-    const target = normalizeBlockPosition(position);
-    if (!target) {
-      throw new Error("Invalid coordinates.");
+    const perform = async () => {
+      const target = normalizeBlockPosition(position);
+      if (!target) {
+        throw new Error("Invalid coordinates.");
+      }
+
+      this.bot.pathfinder.setMovements(this.movements || new Movements(this.bot));
+      this.stopPathing();
+
+      try {
+        await this.bot.pathfinder.goto(new GoalNear(target.x, target.y, target.z, range));
+        return {
+          status: "arrived",
+          position: target
+        };
+      } catch (error) {
+        this.stopPathing();
+        return {
+          status: "blocked",
+          position: target,
+          message: `I couldn't reach ${target.x}, ${target.y}, ${target.z} right now.`
+        };
+      }
+    };
+
+    if (this.activeBotOperation) {
+      return this.#runWithTimeout("go_near", perform, 30000);
     }
 
-    this.bot.pathfinder.setMovements(this.movements || new Movements(this.bot));
-    await this.bot.pathfinder.goto(new GoalNear(target.x, target.y, target.z, range));
+    return this.#withBotOperation("go_near", perform, 30000);
   }
 
   async lookAt(target) {
@@ -346,16 +590,29 @@ class MinecraftBotAdapter extends EventEmitter {
       throw new Error("Bot is not connected.");
     }
 
-    const lookTarget = resolveLookTarget(this.bot, target);
+    const perform = async () => {
+      const lookTarget = resolveLookTarget(this.bot, target);
 
-    if (!lookTarget) {
-      throw new Error("Unable to resolve a target for look_at.");
+      if (!lookTarget) {
+        throw new Error("Unable to resolve a target for look_at.");
+      }
+
+      await this.bot.lookAt(lookTarget, true);
+    };
+
+    if (this.activeBotOperation) {
+      return this.#runWithTimeout("look_at", perform, 10000);
     }
 
-    await this.bot.lookAt(lookTarget, true);
+    return this.#withBotOperation("look_at", perform, 10000);
   }
 
   stopPathing() {
+    if (typeof this.bot?.pathfinder?.stop === "function") {
+      this.bot.pathfinder.stop();
+      return;
+    }
+
     this.bot?.pathfinder?.setGoal(null);
   }
 
@@ -418,12 +675,20 @@ class MinecraftBotAdapter extends EventEmitter {
       throw new Error("Bot is not connected.");
     }
 
-    const normalized = String(command || "").trim();
-    if (!normalized.startsWith("/")) {
-      throw new Error("Commands must start with '/'.");
+    const perform = async () => {
+      const normalized = String(command || "").trim();
+      if (!normalized.startsWith("/")) {
+        throw new Error("Commands must start with '/'.");
+      }
+
+      this.bot.chat(normalized);
+    };
+
+    if (this.activeBotOperation) {
+      return this.#runWithTimeout("run_command", perform, 10000);
     }
 
-    this.bot.chat(normalized);
+    return this.#withBotOperation("run_command", perform, 10000);
   }
 
   buildGiveCommands(missing = [], username = this.config.username) {
@@ -496,33 +761,64 @@ class MinecraftBotAdapter extends EventEmitter {
       throw new Error("Bot is not connected.");
     }
 
-    const target = normalizeBlockPosition(position);
-    const targetVec = toVec3(this.bot, target);
-    const block = targetVec ? this.bot.blockAt(targetVec) : null;
+    const perform = async () => {
+      const target = normalizeBlockPosition(position);
+      const targetVec = toVec3(this.bot, target);
+      const block = targetVec ? this.bot.blockAt(targetVec) : null;
 
-    if (!target || !targetVec || !block || isAirBlock(block)) {
+      if (!target || !targetVec || !block || isAirBlock(block)) {
+        return {
+          status: "skipped",
+          position: target,
+          message: "That spot is already clear."
+        };
+      }
+
+      if (!block.diggable) {
+        return {
+          status: "blocked",
+          position: target,
+          message: `I can't dig ${block.displayName || block.name} there.`
+        };
+      }
+
+      this.stopPathing();
+      let approach = null;
+      try {
+        approach = await this.goNear(target, 3);
+      } catch (error) {
+        approach = {
+          status: "blocked",
+          position: target,
+          message: error.message || `I couldn't reach ${target.x}, ${target.y}, ${target.z} right now.`
+        };
+      }
+
+      if (approach?.status === "blocked") {
+        return approach;
+      }
+
+      try {
+        await this.bot.dig(block);
+      } catch (error) {
+        return {
+          status: "blocked",
+          position: target,
+          message: `I couldn't dig ${block.displayName || block.name} there.`
+        };
+      }
+
       return {
-        status: "skipped",
-        position: target,
-        message: "That spot is already clear."
+        status: "dug",
+        position: target
       };
-    }
-
-    if (!block.diggable) {
-      return {
-        status: "blocked",
-        position: target,
-        message: `I can't dig ${block.displayName || block.name} there.`
-      };
-    }
-
-    await this.goNear(target, 3);
-    await this.bot.dig(block);
-
-    return {
-      status: "dug",
-      position: target
     };
+
+    if (this.activeBotOperation) {
+      return this.#runWithTimeout("dig_block", perform, 30000);
+    }
+
+    return this.#withBotOperation("dig_block", perform, 30000);
   }
 
   findPlacementReference(targetVec) {
@@ -553,20 +849,47 @@ class MinecraftBotAdapter extends EventEmitter {
   }
 
   async clearBlockForPlacement(position) {
-    const targetVec = toVec3(this.bot, position);
-    const block = targetVec ? this.bot.blockAt(targetVec) : null;
+    const perform = async () => {
+      const targetVec = toVec3(this.bot, position);
+      const block = targetVec ? this.bot.blockAt(targetVec) : null;
 
-    if (!block || isAirBlock(block)) {
+      if (!block || isAirBlock(block)) {
+        return true;
+      }
+
+      if (!isReplaceableBlock(block) || !block.diggable) {
+        return false;
+      }
+
+      this.stopPathing();
+      let approach = null;
+      try {
+        approach = await this.goNear(position, 3);
+      } catch (error) {
+        approach = {
+          status: "blocked",
+          message: error.message || "I couldn't reach that spot right now."
+        };
+      }
+
+      if (approach?.status === "blocked") {
+        return false;
+      }
+
+      try {
+        await this.bot.dig(block);
+      } catch (error) {
+        return false;
+      }
+
       return true;
+    };
+
+    if (this.activeBotOperation) {
+      return this.#runWithTimeout("clear_block_for_placement", perform, 30000);
     }
 
-    if (!isReplaceableBlock(block) || !block.diggable) {
-      return false;
-    }
-
-    await this.goNear(position, 3);
-    await this.bot.dig(block);
-    return true;
+    return this.#withBotOperation("clear_block_for_placement", perform, 30000);
   }
 
   async placeBlock(blockName, position) {
@@ -574,77 +897,114 @@ class MinecraftBotAdapter extends EventEmitter {
       throw new Error("Bot is not connected.");
     }
 
-    const target = normalizeBlockPosition(position);
-    const targetVec = toVec3(this.bot, target);
-    const item = this.findInventoryItem(blockName);
+    const perform = async () => {
+      const target = normalizeBlockPosition(position);
+      const targetVec = toVec3(this.bot, target);
+      const item = this.findInventoryItem(blockName);
 
-    if (!target || !targetVec) {
-      throw new Error("Invalid place_block coordinates.");
-    }
+      if (!target || !targetVec) {
+        throw new Error("Invalid place_block coordinates.");
+      }
 
-    if (!item) {
-      return {
-        status: "needs_materials",
-        position: target,
-        message: `I need ${blockName} in my inventory first.`
-      };
-    }
+      if (!item) {
+        return {
+          status: "needs_materials",
+          position: target,
+          message: `I need ${blockName} in my inventory first.`
+        };
+      }
 
-    const existing = this.bot.blockAt(targetVec);
-    if (existing?.name === blockName) {
-      return {
-        status: "already_placed",
-        position: target
-      };
-    }
+      const existing = this.bot.blockAt(targetVec);
+      if (existing?.name === blockName) {
+        return {
+          status: "already_placed",
+          position: target
+        };
+      }
 
-    if (existing && !isAirBlock(existing)) {
-      const cleared = await this.clearBlockForPlacement(target);
-      if (!cleared) {
+      if (existing && !isAirBlock(existing)) {
+        let cleared = false;
+        try {
+          cleared = await this.clearBlockForPlacement(target);
+        } catch (error) {
+          cleared = false;
+        }
+
+        if (!cleared) {
+          return {
+            status: "blocked",
+            position: target,
+            message: `I can't clear ${existing.displayName || existing.name} from that spot.`
+          };
+        }
+      }
+
+      const reference = this.findPlacementReference(targetVec);
+      if (!reference) {
         return {
           status: "blocked",
           position: target,
-          message: `I can't clear ${existing.displayName || existing.name} from that spot.`
+          message: "I need a solid block next to that spot before I can place anything there."
         };
       }
-    }
 
-    const reference = this.findPlacementReference(targetVec);
-    if (!reference) {
-      return {
-        status: "blocked",
-        position: target,
-        message: "I need a solid block next to that spot before I can place anything there."
-      };
-    }
-
-    await this.goNear(target, 4);
-    await this.bot.equip(item, "hand");
-
-    try {
-      await this.bot.placeBlock(reference.block, reference.faceVector);
-    } catch (error) {
-      const afterAttempt = this.bot.blockAt(targetVec);
-      if (afterAttempt?.name === blockName) {
-        return {
-          status: "placed",
+      this.stopPathing();
+      let approach = null;
+      try {
+        approach = await this.goNear(target, 4);
+      } catch (error) {
+        approach = {
+          status: "blocked",
           position: target,
-          block: blockName
+          message: error.message || `I couldn't reach ${target.x}, ${target.y}, ${target.z} right now.`
+        };
+      }
+
+      if (approach?.status === "blocked") {
+        return approach;
+      }
+
+      try {
+        await this.bot.equip(item, "hand");
+      } catch (error) {
+        return {
+          status: "blocked",
+          position: target,
+          message: `I couldn't equip ${blockName} right now.`
+        };
+      }
+
+      try {
+        await this.bot.placeBlock(reference.block, reference.faceVector);
+      } catch (error) {
+        const afterAttempt = this.bot.blockAt(targetVec);
+        if (afterAttempt?.name === blockName) {
+          return {
+            status: "placed",
+            position: target,
+            block: blockName
+          };
+        }
+
+        return {
+          status: "blocked",
+          position: target,
+          message: `I couldn't place ${blockName} there.`
         };
       }
 
       return {
-        status: "blocked",
+        status: "placed",
         position: target,
-        message: `I couldn't place ${blockName} there.`
+        block: blockName
       };
+    };
+
+    if (this.activeBotOperation) {
+      return this.#runWithTimeout("place_block", perform, 45000);
     }
 
-    return {
-      status: "placed",
-      position: target,
-      block: blockName
-    };
+    return this.#withBotOperation("place_block", perform, 45000);
   }
 
   canBuildAt(template, origin) {
@@ -759,74 +1119,95 @@ class MinecraftBotAdapter extends EventEmitter {
       throw new Error("Bot is not connected.");
     }
 
-    if (!template?.placements?.length) {
-      throw new Error("Unknown structure template.");
-    }
+    const perform = async () => {
+      if (!template?.placements?.length) {
+        throw new Error("Unknown structure template.");
+      }
 
-    const origin =
-      normalizeBlockPosition(options.location) ||
-      this.findDirectionalBuildSite(template, options.player || this.config.primaryPlayer) ||
-      this.findFlatBuildSite(template, options.player || this.config.primaryPlayer, options.radius || 10);
+      const origin =
+        normalizeBlockPosition(options.location) ||
+        this.findDirectionalBuildSite(template, options.player || this.config.primaryPlayer) ||
+        this.findFlatBuildSite(template, options.player || this.config.primaryPlayer, options.radius || 10);
 
-    if (!origin) {
-      return {
-        status: "no_site",
-        message: "I couldn't find a clear place nearby to build that."
-      };
-    }
-
-    const requirements = Array.from(
-      template.placements.reduce((counts, placement) => {
-        counts.set(placement.block, (counts.get(placement.block) || 0) + 1);
-        return counts;
-      }, new Map())
-    ).map(([item, count]) => ({ item, count }));
-
-    const missing = this.getMissingMaterials(requirements);
-    if (missing.length) {
-      return {
-        status: "needs_materials",
-        origin,
-        missing,
-        message: `I need ${formatMaterialList(missing)} to build that.`
-      };
-    }
-
-    let placed = 0;
-
-    for (const placement of template.placements) {
-      const target = {
-        x: origin.x + placement.x,
-        y: origin.y + placement.y,
-        z: origin.z + placement.z
-      };
-
-      const result = await this.placeBlock(placement.block, target);
-
-      if (result.status === "blocked" || result.status === "needs_materials") {
+      if (!origin) {
         return {
-          status: result.status,
-          origin,
-          placed,
-          message: result.message
+          status: "no_site",
+          message: "I couldn't find a clear place nearby to build that."
         };
       }
 
-      if (result.status === "placed" || result.status === "already_placed") {
-        placed += 1;
+      this.stopPathing();
+
+      const requirements = Array.from(
+        template.placements.reduce((counts, placement) => {
+          counts.set(placement.block, (counts.get(placement.block) || 0) + 1);
+          return counts;
+        }, new Map())
+      ).map(([item, count]) => ({ item, count }));
+
+      const missing = this.getMissingMaterials(requirements);
+      if (missing.length) {
+        return {
+          status: "needs_materials",
+          origin,
+          missing,
+          message: `I need ${formatMaterialList(missing)} to build that.`
+        };
       }
+
+      let placed = 0;
+
+      for (const placement of template.placements) {
+        const target = {
+          x: origin.x + placement.x,
+          y: origin.y + placement.y,
+          z: origin.z + placement.z
+        };
+
+        let result;
+        try {
+          result = await this.placeBlock(placement.block, target);
+        } catch (error) {
+          result = {
+            status: "blocked",
+            message: error.message || "I got stuck while placing a block.",
+            position: target
+          };
+        }
+
+        if (result.status === "blocked" || result.status === "needs_materials") {
+          return {
+            status: result.status,
+            origin,
+            placed,
+            message: result.message
+          };
+        }
+
+        if (result.status === "placed" || result.status === "already_placed") {
+          placed += 1;
+        }
+      }
+
+      return {
+        status: "completed",
+        origin,
+        placed,
+        structure: template.name,
+        message:
+          template.name === "bridge"
+            ? "Bridge is up."
+            : "Shelter is ready."
+      };
+    };
+
+    const timeoutMs = Math.max(120000, (template?.placements?.length || 0) * 3000);
+
+    if (this.activeBotOperation) {
+      return this.#runWithTimeout("build_structure", perform, timeoutMs);
     }
 
-    return {
-      status: "completed",
-      origin,
-      placed,
-      structure: template.name,
-      message:
-        template.name === "bridge"
-          ? "Bridge is up."
-          : "Shelter is ready."
-    };
+    return this.#withBotOperation("build_structure", perform, timeoutMs);
   }
 
   getSnapshot() {
@@ -872,5 +1253,6 @@ class MinecraftBotAdapter extends EventEmitter {
 }
 
 module.exports = {
-  MinecraftBotAdapter
+  MinecraftBotAdapter,
+  resolveSupportedMinecraftVersion
 };
