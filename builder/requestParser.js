@@ -3,14 +3,7 @@ const {
   normalizeSizeName,
   normalizeStyleName
 } = require("./styleProfiles");
-
-function normalizeText(message) {
-  return String(message || "")
-    .toLowerCase()
-    .replace(/[.!?]+$/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
-}
+const { classifyBuildRequest, hasStructureCue } = require("./buildIntent");
 
 function detectStyle(text) {
   if (/\bbridge\b/.test(text)) {
@@ -122,17 +115,16 @@ function detectFeatures(text, style) {
   return Array.from(new Set(features));
 }
 
-function parseBuildRequest(message, primaryPlayer = "Sage") {
-  const text = normalizeText(message);
-  const hasStructureCue = /\b(bridge|tower|camp|hut|cabin|house|home|shelter|base)\b/.test(text);
-  const hasTemplateCue = /\b(template|blueprint|prebuilt|quick build)\b/.test(text);
-  const hasBuildVerb = /\b(build|construct|make|create|add)\b/.test(text);
+function parseBuildRequest(message, primaryPlayer = "Sage", resolvedAnchor = null) {
+  const request = classifyBuildRequest(message, { resolvedAnchor });
+  const text = request.text;
+  const boundedStructure = hasStructureCue(text);
 
-  if (!hasBuildVerb && !hasTemplateCue) {
+  if (!request.shouldBuild) {
     return null;
   }
 
-  if (!hasStructureCue && !hasTemplateCue) {
+  if (!boundedStructure) {
     return null;
   }
 
@@ -147,7 +139,10 @@ function parseBuildRequest(message, primaryPlayer = "Sage") {
     palette,
     size,
     features,
-    player: primaryPlayer
+    player: primaryPlayer,
+    target: request.target || undefined,
+    location: request.target || undefined,
+    anchorId: request.target?.source === "anchor" ? request.target.anchorId || resolvedAnchor?.anchor?.id || null : resolvedAnchor?.anchor?.id || null
   };
 }
 

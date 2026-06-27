@@ -180,6 +180,7 @@ async function main() {
       sessionId: runtime?.getWorldContext().sessionId || null,
       threadId: runtimeConfig.threadId
     }),
+    isBuildMutationAllowed: () => Boolean(runtime?.getRuntimeState()?.liveConfig?.allowMutationDuringBuild),
     primaryPlayer: runtimeConfig.primaryPlayer,
     companionName: runtimeConfig.companionName,
     allowAutoGiveBuildMaterials: runtimeConfig.allowAutoGiveBuildMaterials,

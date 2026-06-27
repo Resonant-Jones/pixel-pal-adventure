@@ -1,52 +1,46 @@
-function normalizeText(text) {
-  return String(text || "")
-    .toLowerCase()
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function detectBuildIntent(message) {
-  const text = normalizeText(message);
-  if (!text) {
-    return false;
-  }
-
-  if (/\b(build|construct|make)\b/.test(text)) {
-    return true;
-  }
-
-  return false;
-}
+const { classifyBuildRequest } = require("../builder/buildIntent");
 
 function routeBuildLane({
   message,
+  resolvedAnchor = null,
   intentSignal = null,
   buildStatus = null,
   buildMode = "hybrid",
   mutationPolicy = { allowMutationDuringBuild: false }
 } = {}) {
-  const wantsBuild = detectBuildIntent(message);
-  const needsClarification = Boolean(intentSignal?.needsClarification);
+  const buildRequest = classifyBuildRequest(message, { resolvedAnchor });
 
-  if (needsClarification) {
-    return {
-      lane: "social",
-      reason: "intent_clarification",
-      clarification: intentSignal?.suggestedQuestion || null,
-      readiness: intentSignal?.readiness || "not_executable"
-    };
-  }
-
-  if (buildStatus?.active && wantsBuild && !mutationPolicy.allowMutationDuringBuild) {
+  if (buildStatus?.active && buildRequest.shouldBuild && !mutationPolicy.allowMutationDuringBuild) {
     return {
       lane: "social",
       reason: "mutation_gate",
       clarification: "I am already building. Do you want me to pause and change the plan?",
-      readiness: "not_executable"
+      readiness: intentSignal?.readiness || "not_executable"
     };
   }
 
-  if (!wantsBuild) {
+  if (!buildRequest.explicitBuildIntent) {
+    return {
+      lane: "social",
+      reason: buildRequest.hasNegation
+        ? "negative_build_instruction"
+        : buildRequest.hasHypothetical
+          ? "hypothetical_build_language"
+          : "social_only"
+    };
+  }
+
+  if (buildRequest.needsClarification) {
+    return {
+      lane: "social",
+      reason: buildRequest.hasTarget ? "build_requires_bounds" : "build_requires_target",
+      clarification: buildRequest.hasTarget
+        ? "If you want me to build there, tell me what shape to make, like a hut, tower, or bridge."
+        : "If you want me to build, give me a target like an anchor or coordinates."
+    };
+  }
+
+  if (!buildRequest.shouldBuild) {
     return {
       lane: "social",
       reason: "social_only"
@@ -67,7 +61,8 @@ function routeBuildLane({
   return {
     lane,
     buildLane,
-    reason: "build_request"
+    reason: "build_request",
+    target: buildRequest.target
   };
 }
 

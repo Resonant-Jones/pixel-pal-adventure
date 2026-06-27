@@ -1,4 +1,5 @@
 const {
+  DEFAULT_ALLOWED_ACTIONS,
   buildSystemPrompt,
   buildUserPrompt,
   buildAdventureSummarySystemPrompt,
@@ -21,7 +22,10 @@ async function buildContext({
   eventWindow = 6,
   summaryContextLimit = 3,
   retryGuidance = null,
-  feedbackSummary = null
+  feedbackSummary = null,
+  operatorInstruction = null,
+  spatialReferences = [],
+  allowedActions = DEFAULT_ALLOWED_ACTIONS
 }) {
   const [recentMessages, recentEvents, recentSummaries, recentReflexEvents] = await Promise.all([
     messageStore.getRecentMessages(threadId, memoryWindow, { worldId }),
@@ -49,6 +53,9 @@ async function buildContext({
     }),
     userPrompt: buildUserPrompt({
       latestMessage,
+      operatorInstruction,
+      spatialReferences,
+      allowedActions,
       recentMessages,
       recentEvents: filteredEvents,
       recentSummaries,

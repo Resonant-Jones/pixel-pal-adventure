@@ -85,6 +85,7 @@ class ActionExecutor {
     botAdapter,
     jobStore,
     getWorldContext,
+    isBuildMutationAllowed = () => false,
     primaryPlayer = "Sage",
     companionName = "Guardian",
     allowAutoGiveBuildMaterials = false,
@@ -94,6 +95,7 @@ class ActionExecutor {
     this.botAdapter = botAdapter;
     this.jobStore = jobStore;
     this.getWorldContext = getWorldContext;
+    this.isBuildMutationAllowed = isBuildMutationAllowed;
     this.primaryPlayer = primaryPlayer;
     this.companionName = companionName;
     this.allowAutoGiveBuildMaterials = allowAutoGiveBuildMaterials;
@@ -211,18 +213,34 @@ class ActionExecutor {
         }
 
         const composeAction = this.createComposeAction(action);
+        const location = normalizeCoordinates(
+          composeAction.location || composeAction.target || composeAction.position || composeAction.coordinates
+        );
+        const hasBuildBounds = Boolean(
+          composeAction.size || composeAction.bounds || composeAction.template || composeAction.structure
+        );
+
+        if (!location) {
+          throw new Error("compose_structure action requires a target location.");
+        }
+
+        if (!hasBuildBounds) {
+          throw new Error("compose_structure action requires build bounds.");
+        }
+
         const direction = composeAction.direction || this.botAdapter.getFacingDirection(this.primaryPlayer);
         const compiled = compileStructure({
           ...composeAction,
           direction
         });
-        const location = normalizeCoordinates(
-          composeAction.location || composeAction.target || composeAction.position || composeAction.coordinates
-        );
         const worldContext = this.getWorldContext();
 
         if (!worldContext?.worldId || !worldContext?.sessionId) {
           throw new Error("Cannot create a build job before world context is ready.");
+        }
+
+        if (!this.isBuildMutationAllowed()) {
+          throw new Error("compose_structure action requires build mutation permission.");
         }
 
         const job = await this.jobStore.createJob({

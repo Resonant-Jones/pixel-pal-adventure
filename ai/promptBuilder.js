@@ -1,5 +1,27 @@
 const { formatWorldSnapshot } = require("../minecraft/worldSnapshot");
 
+const DEFAULT_ALLOWED_ACTIONS = [
+  "none",
+  "follow_player",
+  "stop_following",
+  "move_to",
+  "look_at",
+  "chat",
+  "compose_structure",
+  "inventory_status",
+  "inspect_build_site",
+  "plan_build",
+  "clear_footprint",
+  "place_block",
+  "break_block",
+  "continue_build_phase",
+  "repair_failed_step",
+  "gather_materials",
+  "explain_build_plan",
+  "finalize_build",
+  "start_emergent_build"
+];
+
 function formatRecentMessages(messages) {
   if (!messages.length) {
     return "No prior conversation stored.";
@@ -40,6 +62,37 @@ function formatRecentReflexes(events) {
     .join("\n");
 }
 
+function formatSpatialReferences(references) {
+  if (!Array.isArray(references) || !references.length) {
+    return "No explicit spatial references.";
+  }
+
+  return references
+    .map((reference) => {
+      if (!reference || typeof reference !== "object") {
+        return `- ${String(reference)}`;
+      }
+
+      if ([reference.x, reference.y, reference.z].every((value) => Number.isFinite(Number(value)))) {
+        const prefix = reference.source ? `${reference.source}: ` : "";
+        const anchorSuffix = reference.anchorId ? ` (anchor ${reference.anchorId})` : "";
+        return `- ${prefix}${Math.floor(Number(reference.x))}, ${Math.floor(Number(reference.y))}, ${Math.floor(Number(reference.z))}${anchorSuffix}`;
+      }
+
+      if (reference.description) {
+        return `- ${reference.description}`;
+      }
+
+      return `- ${JSON.stringify(reference)}`;
+    })
+    .join("\n");
+}
+
+function formatAllowedActions(actions) {
+  const allowed = Array.isArray(actions) && actions.length ? actions : DEFAULT_ALLOWED_ACTIONS;
+  return allowed.map((action) => `- ${action}`).join("\n");
+}
+
 function buildSystemPrompt({
   companionName = "Guardian",
   primaryPlayer = "Sage",
@@ -62,6 +115,9 @@ Rules:
 - Use recent conversation and world state to stay consistent across sessions.
 - Use nearby blocks, nearby entities, time of day, health, and hunger when they matter.
 - Never claim to perceive something that is not in the provided world snapshot.
+- Do not invent coordinates, anchors, or build targets.
+- Treat hypothetical, wishful, or retrospective build language as chat unless the request is explicit and targeted.
+- Only use "compose_structure" when the user has explicitly asked for a build with a real target or anchor.
 - If an action is unsafe or impossible, explain that in the message and use action type "none".
 
 Return JSON with this shape when possible:
@@ -97,6 +153,9 @@ Use "none" when no physical action is needed.`;
 
 function buildUserPrompt({
   latestMessage,
+  operatorInstruction = null,
+  spatialReferences = [],
+  allowedActions = DEFAULT_ALLOWED_ACTIONS,
   recentMessages,
   recentEvents,
   recentSummaries,
@@ -112,11 +171,16 @@ function buildUserPrompt({
   const feedbackSection = feedbackSummary
     ? `Feedback summary:\n${feedbackSummary}\n\n`
     : "";
+  const operatorInstructionSection = operatorInstruction
+    ? `Operator instruction:\n${operatorInstruction}\n\n`
+    : "Operator instruction:\nNone separate from the user message.\n\n";
+  const spatialReferencesSection = `Spatial references:\n${formatSpatialReferences(spatialReferences)}\n\n`;
+  const allowedActionsSection = `Allowed actions:\n${formatAllowedActions(allowedActions)}\n\n`;
 
   return `Latest player message:
 ${latestMessage}
 
-Recent conversation:
+${operatorInstructionSection}${spatialReferencesSection}${allowedActionsSection}Recent conversation:
 ${formatRecentMessages(recentMessages)}
 
 Recent events:
@@ -164,6 +228,7 @@ Focus on discoveries, dangers, or achievements.`;
 }
 
 module.exports = {
+  DEFAULT_ALLOWED_ACTIONS,
   buildSystemPrompt,
   buildUserPrompt,
   buildAdventureSummarySystemPrompt,

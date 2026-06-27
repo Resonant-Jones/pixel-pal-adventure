@@ -1857,6 +1857,7 @@ class AgentRuntime {
       });
       const laneDecision = routeBuildLane({
         message: payload.message,
+        resolvedAnchor,
         intentSignal,
         buildStatus,
         buildMode: this.runtimeState.liveConfig.buildMode || "hybrid",
@@ -1906,7 +1907,7 @@ class AgentRuntime {
         return;
       }
 
-      const parsedBuild = parseBuildRequest(payload.message, this.primaryPlayer);
+      const parsedBuild = parseBuildRequest(payload.message, this.primaryPlayer, resolvedAnchor);
       if (parsedBuild && laneDecision?.buildLane === "template") {
         const reply = {
           message: "",
@@ -1929,31 +1930,31 @@ class AgentRuntime {
 
       const feedbackSummary =
         laneDecision?.lane === "task" ? feedbackSummaries.taskSummary : feedbackSummaries.socialSummary;
-    const createSuccessSignature = ({ retryDomain, actionType, provider, operationSubtype }) =>
-      createNormalizedFailureSignature({
-        retryDomain,
-        actionType,
-        errorCode: "success",
-        errorCategory: "success",
-        provider,
-        operationSubtype,
-        signatureVersion: "v1"
-      });
+      const createSuccessSignature = ({ retryDomain, actionType, provider, operationSubtype }) =>
+        createNormalizedFailureSignature({
+          retryDomain,
+          actionType,
+          errorCode: "success",
+          errorCategory: "success",
+          provider,
+          operationSubtype,
+          signatureVersion: "v1"
+        });
 
-    const isNonRetryableSignature = (signature) => {
-      const nonRetryableCodes = new Set([
-        "missing_required_input",
-        "invalid_coordinates",
-        "invalid_command",
-        "unknown_structure",
-        "invalid_target",
-        "permission_refusal",
-        "safety_refusal",
-        "auth_failure",
-        "bootstrap_failure"
-      ]);
-      return nonRetryableCodes.has(signature?.errorCode);
-    };
+      const isNonRetryableSignature = (signature) => {
+        const nonRetryableCodes = new Set([
+          "missing_required_input",
+          "invalid_coordinates",
+          "invalid_command",
+          "unknown_structure",
+          "invalid_target",
+          "permission_refusal",
+          "safety_refusal",
+          "auth_failure",
+          "bootstrap_failure"
+        ]);
+        return nonRetryableCodes.has(signature?.errorCode);
+      };
 
     const recordAttemptOutcome = async ({
       attemptId,
@@ -2057,9 +2058,9 @@ class AgentRuntime {
             bot: this.botAdapter.bot,
             threadId: this.threadId,
             worldId: worldContext.worldId,
-            latestMessage: resolvedAnchor?.anchor
-              ? `${payload.message}\nTarget anchor: ${formatAnchorSummary(resolvedAnchor.anchor)?.description || resolvedAnchor.anchor.label}`
-              : payload.message,
+            latestMessage: payload.message,
+            operatorInstruction: null,
+            spatialReferences: resolvedAnchor?.anchor ? [formatAnchorSummary(resolvedAnchor.anchor)] : [],
             primaryPlayer: this.primaryPlayer,
             companionName: identityProfile.displayName,
             role: identityProfile.role,

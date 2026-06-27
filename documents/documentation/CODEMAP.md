@@ -18,11 +18,11 @@ This repository is split between a Node.js agent runtime, a Mineflayer Minecraft
 | Path | Responsibility | Important files |
 | --- | --- | --- |
 | `scripts/` | Agent bootstrap and process shutdown | `startAgent.js` |
-| `agent/` | Runtime orchestration, turn execution, retries, reconnects, and runtime state | `agentRuntime.js`, `actionExecutor.js`, `contextBuilder.js`, `retryCoordinator.js`, `retrySignatures.js`, `runtimeState.js`, `stateProjector.js`, `commandService.js`, `identityPresets.js` |
+| `agent/` | Runtime orchestration, turn execution, retries, reconnects, and runtime state | `agentRuntime.js`, `actionExecutor.js`, `buildLaneRouter.js`, `contextBuilder.js`, `retryCoordinator.js`, `retrySignatures.js`, `runtimeState.js`, `stateProjector.js`, `commandService.js`, `identityPresets.js` |
 | `minecraft/` | Mineflayer bot adapter and world snapshotting | `bot.js`, `worldSnapshot.js` |
 | `ai/` | Model-provider clients and prompt building | `minimaxClient.js`, `groqClient.js`, `ollamaClient.js`, `promptBuilder.js` |
 | `memory/` | SurrealDB client and persistent stores | `surrealClient.js`, `messageStore.js`, `eventStore.js`, `worldStore.js`, `sessionStore.js`, `jobStore.js`, `learningStore.js`, `reflexStateStore.js`, `anchorStore.js`, `companionIdentityStore.js`, `profileStore.js` |
-| `builder/` | Structure parsing, compilation, and build job execution | `requestParser.js`, `styleProfiles.js`, `structureCompiler.js`, `primitiveExecutor.js`, `buildWorker.js` |
+| `builder/` | Structure parsing, compilation, and build job execution | `buildIntent.js`, `requestParser.js`, `styleProfiles.js`, `structureCompiler.js`, `primitiveExecutor.js`, `buildWorker.js` |
 | `reflex/` | Reflex classification and reflex job handling | `reflexClassifier.js`, `reflexWorker.js`, `reflexTemplates.js`, `worldIdentity.js` |
 | `control/` | Local HTTP/WebSocket control plane for the dashboard | `localControlServer.js`, `runtimeEventBus.js` |
 | `dashboard/` | Tauri + React operator console | `src/store/runtimeStore.ts`, `src/lib/runtimeClient.ts`, `src/lib/eventText.ts`, `src/components/KidMode.tsx`, `src/components/BuilderMode.tsx`, `src-tauri/src/main.rs` |
@@ -67,7 +67,8 @@ This repository is split between a Node.js agent runtime, a Mineflayer Minecraft
 
 ### Build And Reflex Automation
 
-- `builder/requestParser.js`: turns free-form build requests into a normalized `compose_structure` action.
+- `agent/buildLaneRouter.js`: decides whether a message is eligible for the build lane or should stay social/chat.
+- `builder/requestParser.js`: turns explicit, eligible build requests into a normalized `compose_structure` action.
 - `builder/styleProfiles.js`: resolves style, size, palette, and feature defaults for builds.
 - `builder/structureCompiler.js`: compiles a style plan into primitives and a bill of materials.
 - `builder/primitiveExecutor.js`: expands primitives into block placements.
