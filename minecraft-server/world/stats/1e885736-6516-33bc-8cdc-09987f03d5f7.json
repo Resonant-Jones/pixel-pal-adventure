@@ -1,0 +1,28 @@
+{
+  "stats": {
+    "minecraft:custom": {
+      "minecraft:time_since_rest": 10696,
+      "minecraft:total_world_time": 1519531,
+      "minecraft:leave_game": 128039,
+      "minecraft:damage_taken": 24722,
+      "minecraft:play_time": 1519531,
+      "minecraft:deaths": 93,
+      "minecraft:time_since_death": 10695
+    },
+    "minecraft:picked_up": {
+      "minecraft:leaf_litter": 5,
+      "minecraft:oak_sapling": 1,
+      "minecraft:rotten_flesh": 4
+    },
+    "minecraft:killed_by": {
+      "minecraft:phantom": 6,
+      "minecraft:skeleton": 50,
+      "minecraft:witch": 6,
+      "minecraft:creeper": 4,
+      "minecraft:spider": 6,
+      "minecraft:drowned": 1,
+      "minecraft:zombie": 20
+    }
+  },
+  "DataVersion": 4671
+}

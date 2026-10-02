@@ -21,6 +21,8 @@ const {
   createRetryAttemptEnvelope,
   createRetryOutcomeEnvelope
 } = require("../structures/retrySchemas");
+const { FirstGreet } = require("./firstGreet");
+const { enqueueWelcomeHut } = require("./welcomeHut");
 
 function escapeRegex(text) {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -146,6 +148,11 @@ class AgentRuntime {
     this.debugBuildPlans = debugBuildPlans;
     this.logger = logger;
     this.feedbackBroker = new FeedbackBroker({ logger });
+    this.firstGreet = new FirstGreet({
+      logger,
+      primaryPlayer: this.primaryPlayer,
+      companionName: this.companionName
+    });
     this.bound = false;
     this.readyForTurns = false;
     this.observedChatCount = 0;
@@ -1310,6 +1317,19 @@ class AgentRuntime {
       snapshot
     });
 
+    if (this.isNewWorld) {
+      void enqueueWelcomeHut({
+        botAdapter: this.botAdapter,
+        jobStore: this.jobStore,
+        eventStore: this.eventStore,
+        threadId: this.threadId,
+        worldContext: this.getWorldContext(),
+        primaryPlayer: this.primaryPlayer,
+        companionName: this.companionName,
+        logger: this.logger
+      });
+    }
+
     this.startBackgroundLoops();
     void this.runReflexScan("startup");
   }
@@ -1353,13 +1373,17 @@ class AgentRuntime {
 
     if (!this.reflexWorkerTimer) {
       this.reflexWorkerTimer = setInterval(() => {
-        void this.reflexWorker.runOnce();
+        this.reflexWorker.runOnce().catch((error) => {
+          this.logger.error?.("[reflex] Worker tick failed (will retry next tick):", error?.message || error);
+        });
       }, this.reflexWorkerIntervalMs);
     }
 
     if (!this.buildWorkerTimer) {
       this.buildWorkerTimer = setInterval(() => {
-        void this.buildWorker.runOnce();
+        this.buildWorker.runOnce().catch((error) => {
+          this.logger.error?.("[build] Worker tick failed (will retry next tick):", error?.message || error);
+        });
       }, this.buildWorkerIntervalMs);
     }
   }
@@ -1466,6 +1490,10 @@ class AgentRuntime {
     try {
       if (!this.readyForTurns || !this.shouldObserve(payload)) {
         return;
+      }
+
+      if (payload.username === this.primaryPlayer) {
+        await this.firstGreet.deliver(this.botAdapter, payload);
       }
 
       const observedSnapshot = this.botAdapter.getSnapshot();

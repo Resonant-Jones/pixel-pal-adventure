@@ -1,10 +1,12 @@
 const smallWoodHouse = require("./small_wood_house.json");
 const bridge = require("./bridge.json");
+const welcomeHut = require("./welcome_hut.json");
 const retrySchemas = require("./retrySchemas");
 
 const STRUCTURES = {
   small_wood_house: smallWoodHouse,
-  bridge
+  bridge,
+  welcome_hut: welcomeHut
 };
 
 function normalizeStructureName(name) {

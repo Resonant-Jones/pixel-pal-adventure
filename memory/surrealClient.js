@@ -154,7 +154,20 @@ class SurrealClient {
     const schema = fs.readFileSync(schemaPath, "utf8");
 
     if (schema.trim()) {
-      await db.query(schema);
+      try {
+        await db.query(schema);
+      } catch (error) {
+        // Schema bootstrap is best-effort. SurrealDB occasionally returns
+        // transaction conflicts when the schema is already applied by another
+        // caller; that's fine — we treat the schema as loaded and move on.
+        // Any *other* schema error is logged but never fatal; the runtime
+        // can still operate against whatever schema is already in place.
+        this.logger.warn?.(
+          `[memory] Schema bootstrap warning (${error?.message || error}); continuing with existing schema if any`
+        );
+        this.schemaBootstrapped = true;
+        return;
+      }
     }
 
     this.schemaBootstrapped = true;
@@ -162,7 +175,43 @@ class SurrealClient {
 
   async query(statement, variables = {}) {
     const db = await this.connect();
-    return db.query(statement, sanitizeSurrealValue(variables));
+    try {
+      return await db.query(statement, sanitizeSurrealValue(variables));
+    } catch (error) {
+      // JWT session tokens expire. When that happens the server returns 401.
+      // Drop the cached handle so the next connect() re-signs in, then retry
+      // the original statement exactly once. We deliberately do NOT call
+      // connect() recursively here — that re-enters bootstrapSchema and
+      // risks a schema transaction conflict.
+      if (this.#isAuthError(error)) {
+        this.logger.warn?.("[memory] SurrealDB auth expired; reconnecting and retrying once");
+        await this.#reauthenticate();
+        const fresh = await this.connect();
+        return fresh.query(statement, sanitizeSurrealValue(variables));
+      }
+      throw error;
+    }
+  }
+
+  #isAuthError(error) {
+    if (!error) return false;
+    const status = error.status || error.response?.status || error.cause?.status;
+    if (status === 401) return true;
+    const message = String(error.message || "");
+    return /token has expired|unauthorized|invalid token|not enough permissions/i.test(message);
+  }
+
+  async #reauthenticate() {
+    // Close the dead connection (capture it BEFORE nulling this.db), then
+    // drop cached state. We deliberately preserve schemaBootstrapped = true
+    // because the schema is already applied in SurrealDB; re-bootstrapping
+    // is what caused a TransactionConflict crash previously.
+    const oldDb = this.db;
+    this.db = null;
+    this.connecting = null;
+    if (oldDb?.close) {
+      try { await oldDb.close(); } catch (_e) { /* best effort */ }
+    }
   }
 
   async close() {

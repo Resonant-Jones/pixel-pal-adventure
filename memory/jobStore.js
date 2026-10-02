@@ -70,12 +70,20 @@ class JobStore {
       return null;
     }
 
-    const [selected] = await this.client.query(
-      'SELECT * FROM jobs WHERE world_id = $worldId AND type INSIDE ["build_structure", "build_emergent"] AND status INSIDE ["pending", "paused"] ORDER BY created_at ASC LIMIT 20;',
-      {
-        worldId
-      }
-    );
+    let selected;
+    try {
+      selected = await this.client.query(
+        'SELECT * FROM jobs WHERE world_id = $worldId AND type INSIDE ["build_structure", "build_emergent"] AND status INSIDE ["pending", "paused"] ORDER BY created_at ASC LIMIT 20;',
+        {
+          worldId
+        }
+      );
+    } catch (error) {
+      // Swallow transient DB errors so the worker's poll loop survives auth
+      // refreshes, network blips, or schema hiccups. The next tick will retry.
+      console.warn("[jobStore] getNextBuildJob failed (will retry next tick):", error?.message || error);
+      return null;
+    }
 
     const jobs = getStatementRows(selected);
     const now = Date.now();

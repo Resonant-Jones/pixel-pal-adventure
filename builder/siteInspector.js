@@ -1,3 +1,5 @@
+const { Vec3 } = require("vec3");
+
 function isAirBlock(block) {
   return !block || ["air", "cave_air", "void_air"].includes(block.name);
 }
@@ -51,11 +53,11 @@ function inspectFootprint(botAdapter, origin, footprint, options = {}) {
 
   for (let dx = 0; dx < width; dx += 1) {
     for (let dz = 0; dz < depth; dz += 1) {
-      const target = {
-        x: Math.floor(origin.x + dx),
-        y: baseY,
-        z: Math.floor(origin.z + dz)
-      };
+      const target = new Vec3(
+        Math.floor(origin.x + dx),
+        baseY,
+        Math.floor(origin.z + dz)
+      );
       const block = botAdapter.bot.blockAt(target);
       if (!block) {
         obstructed.push(target);
