@@ -8,6 +8,7 @@ const { AgentRuntime } = require("../agent/agentRuntime");
 const { ActionExecutor } = require("../agent/actionExecutor");
 const { MiniMaxClient } = require("../ai/minimaxClient");
 const { GroqClient } = require("../ai/groqClient");
+const { getDeepSeekConfig, validateDeepSeekConfig } = require("../config/deepseek");
 const { OllamaClient } = require("../ai/ollamaClient");
 const { LocalControlServer } = require("../control/localControlServer");
 const { RuntimeEventBus } = require("../control/runtimeEventBus");
@@ -62,6 +63,15 @@ function buildLlmClient(env = process.env) {
     };
   }
 
+  if (provider === "deepseek") {
+    const deepSeekConfig = getDeepSeekConfig(env);
+    validateDeepSeekConfig(deepSeekConfig);
+    return {
+      provider,
+      client: new GroqClient(deepSeekConfig)
+    };
+  }
+
   if (provider === "groq") {
     const groqConfig = getGroqConfig(env);
     validateGroqConfig(groqConfig);
@@ -80,7 +90,9 @@ function buildLlmClient(env = process.env) {
     };
   }
 
-  throw new Error(`Unsupported LLM_PROVIDER "${provider}". Use "minimax", "groq", or "ollama".`);
+  throw new Error(
+      `Unsupported LLM_PROVIDER "${provider}". Use "minimax", "deepseek", "groq", or "ollama".`
+    );
 }
 
 function buildRuntimeConfig(effectiveSettings, env = process.env) {
@@ -175,12 +187,28 @@ async function main() {
   const actionExecutor = new ActionExecutor({
     botAdapter,
     jobStore,
+    anchorStore,
     getWorldContext: () => ({
       worldId: runtime?.getWorldContext().worldId || null,
       sessionId: runtime?.getWorldContext().sessionId || null,
       threadId: runtimeConfig.threadId
     }),
-    isBuildMutationAllowed: () => Boolean(runtime?.getRuntimeState()?.liveConfig?.allowMutationDuringBuild),
+    // `allowMutationDuringBuild` answers "may a NEW build start while one is
+    // already running?" — it is NOT a global "is building permitted?" switch.
+    // Reading it as the latter made every build throw
+    // "compose_structure action requires build mutation permission", which
+    // surfaced in-game as "I lost the thread for a moment." Building is
+    // always allowed; only *concurrent* building needs this flag.
+    isBuildMutationAllowed: () => {
+      const state = runtime?.getRuntimeState?.();
+      if (!state) {
+        return false;
+      }
+      if (state.liveConfig?.allowMutationDuringBuild) {
+        return true;
+      }
+      return !(state.buildStatus?.state === "running" || state.buildStatus?.state === "paused");
+    },
     primaryPlayer: runtimeConfig.primaryPlayer,
     companionName: runtimeConfig.companionName,
     allowAutoGiveBuildMaterials: runtimeConfig.allowAutoGiveBuildMaterials,

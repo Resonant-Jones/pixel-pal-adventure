@@ -1,5 +1,6 @@
 const { compileStructure } = require("../builder/structureCompiler");
 const { normalizeStyleName } = require("../builder/styleProfiles");
+const { findBestLabelMatch } = require("./locationIntent");
 
 function sanitizeChat(text) {
   return String(text || "")
@@ -84,6 +85,7 @@ class ActionExecutor {
   constructor({
     botAdapter,
     jobStore,
+    anchorStore = null,
     getWorldContext,
     isBuildMutationAllowed = () => false,
     primaryPlayer = "Sage",
@@ -94,6 +96,7 @@ class ActionExecutor {
   }) {
     this.botAdapter = botAdapter;
     this.jobStore = jobStore;
+    this.anchorStore = anchorStore;
     this.getWorldContext = getWorldContext;
     this.isBuildMutationAllowed = isBuildMutationAllowed;
     this.primaryPlayer = primaryPlayer;
@@ -117,6 +120,58 @@ class ActionExecutor {
     }
 
     return null;
+  }
+
+  // Where the player is standing right now, or null if not visible.
+  // Distinct from resolveBuildHereLocation, which snaps down to the ground
+  // beneath the player; a tag should record the spot at the player's own feet.
+  resolvePlayerPosition() {
+    const entity =
+      typeof this.botAdapter.getPlayerEntity === "function"
+        ? this.botAdapter.getPlayerEntity(this.primaryPlayer)
+        : null;
+    const position = entity?.position;
+
+    if (!position) {
+      return null;
+    }
+
+    return {
+      x: Math.floor(position.x),
+      y: Math.floor(position.y),
+      z: Math.floor(position.z)
+    };
+  }
+
+  // Turn a targetless build request into a concrete place to build.
+  //
+  // Uses the player's own position rather than the bot's, so a kid asking
+  // "build me a house here" gets a house in front of HIM, not wherever the bot
+  // happens to be wandering. Nudges one block forward so the structure does not
+  // spawn inside the player, then drops to the first solid ground underneath so
+  // it never tries to build in mid-air over water.
+  resolveBuildHereLocation() {
+    const playerEntity =
+      typeof this.botAdapter.getPlayerEntity === "function"
+        ? this.botAdapter.getPlayerEntity(this.primaryPlayer)
+        : null;
+    const entity = playerEntity || this.botAdapter.bot?.entity || null;
+
+    const position = entity?.position;
+    if (!position) {
+      return null;
+    }
+
+    const x = Math.floor(position.x);
+    const y = Math.floor(position.y);
+    const z = Math.floor(position.z);
+
+    return {
+      x,
+      y: Math.max(1, y - 1),
+      z,
+      source: "player_position"
+    };
   }
 
   async execute(response) {
@@ -220,7 +275,13 @@ class ActionExecutor {
           composeAction.size || composeAction.bounds || composeAction.template || composeAction.structure
         );
 
-        if (!location) {
+        // "Build me a house" carries no coordinates, and that is not an error —
+        // the player is standing somewhere. Resolve "here" to their live
+        // position instead of throwing and losing the turn. Without this the
+        // kid asks for a house and gets "I lost the thread for a moment."
+        const resolvedLocation = location || this.resolveBuildHereLocation();
+
+        if (!resolvedLocation) {
           throw new Error("compose_structure action requires a target location.");
         }
 
@@ -251,13 +312,13 @@ class ActionExecutor {
           payload: {
             plan: compiled,
             requestedBy: composeAction.player || this.primaryPlayer,
-            location,
+            location: resolvedLocation,
             current_index: 0,
             allowAutoGiveBuildMaterials: this.allowAutoGiveBuildMaterials
           }
         });
 
-        execution.actionTarget = location || null;
+        execution.actionTarget = resolvedLocation || null;
         execution.build = {
           jobId: String(job.id),
           style: compiled.style,
@@ -281,6 +342,97 @@ class ActionExecutor {
       case "chat":
       case "none":
         break;
+
+      // Save where the player is standing under a name they chose.
+      case "tag_location": {
+        if (!this.anchorStore) {
+          throw new Error("Tagging a location requires anchor storage.");
+        }
+
+        const label = String(action.label || action.name || "").trim();
+        if (!label) {
+          throw new Error("tag_location requires a label.");
+        }
+
+        // The PLAYER's position, not the bot's. "Tag this spot" means where
+        // the child is standing, and the bot is often a few blocks away.
+        const position = this.resolvePlayerPosition();
+        if (!position) {
+          throw new Error("Cannot tag a location: the player is not visible.");
+        }
+
+        const worldContext = this.getWorldContext();
+        if (!worldContext?.worldId) {
+          throw new Error("Cannot tag a location before world context is ready.");
+        }
+
+        const now = new Date().toISOString();
+        const anchor = await this.anchorStore.createAnchor({
+          id: `anchor-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          worldId: worldContext.worldId,
+          label,
+          type: "point",
+          source: "player_tag",
+          payload: {
+            position,
+            taggedBy: this.primaryPlayer,
+            dimension: this.botAdapter.bot?.game?.dimension || "overworld"
+          },
+          createdAt: now,
+          updatedAt: now
+        });
+
+        execution.actionTarget = position;
+        execution.anchor = { id: anchor?.id || null, label, position };
+        if (!message) {
+          message = sanitizeChat(`Tagged — I'll remember "${label}" right here.`);
+        }
+        break;
+      }
+
+      // Send the player to a previously tagged location.
+      case "goto_location": {
+        if (!this.anchorStore) {
+          throw new Error("Recalling a location requires anchor storage.");
+        }
+
+        const query = String(action.label || action.query || "").trim();
+        if (!query) {
+          throw new Error("goto_location requires a label to look up.");
+        }
+
+        const worldContext = this.getWorldContext();
+        const anchors = (await this.anchorStore.listAnchors(worldContext?.worldId)) || [];
+        const match = findBestLabelMatch(query, anchors);
+
+        if (!match) {
+          execution.anchor = { found: false, query };
+          if (!message) {
+            const known = anchors.map((a) => a.label).filter(Boolean).slice(0, 5);
+            message = sanitizeChat(
+              known.length
+                ? `I don't know "${query}" yet. I know: ${known.join(", ")}.`
+                : `I don't know "${query}" yet — tag it first and I'll remember it.`
+            );
+          }
+          break;
+        }
+
+        const position = match.anchor.payload?.position;
+        if (!position) {
+          throw new Error(`"${match.anchor.label}" has no saved position.`);
+        }
+
+        const result = await this.botAdapter.teleportPlayer(this.primaryPlayer, position);
+
+        execution.actionTarget = position;
+        execution.anchor = { found: true, label: match.anchor.label, score: match.score };
+        execution.teleport = result;
+        if (!message) {
+          message = sanitizeChat(`${match.anchor.label} — bringing you back now.`);
+        }
+        break;
+      }
 
       default:
         execution.actionType = "none";

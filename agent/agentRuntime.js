@@ -10,9 +10,16 @@ const { BuildWorker } = require("../builder/buildWorker");
 const { FeedbackBroker } = require("../middleware/feedbackBroker");
 const { analyzeIntent } = require("./intentCoach");
 const { routeBuildLane } = require("./buildLaneRouter");
+const { parseLocationIntent } = require("./locationIntent");
+const { PresenceController } = require("./presenceController");
+const { SurvivalController } = require("../survival/survivalController");
 const { RetryCoordinator } = require("./retryCoordinator");
 const { buildIdentityPromptProfile, resolveIdentityPreset } = require("./identityPresets");
-const { buildNormalizedFailureSignature, classifyConnectionError } = require("./retrySignatures");
+const {
+  buildNormalizedFailureSignature,
+  classifyConnectionError,
+  isDuplicateLoginKick
+} = require("./retrySignatures");
 const { formatAnchorSummary } = require("../memory/anchorStore");
 const {
   RETRY_DOMAINS,
@@ -218,6 +225,26 @@ class AgentRuntime {
       getLastSequence: () => this.runtimeState.lastSequence
     });
 
+    this.presenceController = new PresenceController({
+      botAdapter: this.botAdapter,
+      primaryPlayer: this.primaryPlayer,
+      followDistance: Number(this.botAdapter.config.followDistance || 3),
+      logger: this.logger
+    });
+
+    // Self-preservation runs on its own fast loop and never waits for the
+    // model. See survival/survivalController.js for why the LLM is excluded
+    // from the reaction path.
+    this.survivalController = new SurvivalController({
+      botAdapter: this.botAdapter,
+      primaryPlayer: this.primaryPlayer,
+      logger: this.logger,
+      enabled: this.runtimeState.liveConfig.selfPreservationEnabled !== false,
+      onEvent: (event) => this.handleSurvivalEvent(event)
+    });
+
+    this.botEventHandlers = null;
+
     this.reflexClassifier = new ReflexClassifier({
       botAdapter: this.botAdapter,
       eventStore: this.eventStore,
@@ -243,6 +270,7 @@ class AgentRuntime {
         enabled: Boolean(this.runtimeState.liveConfig.narrativeReflexEnabled),
         highSalienceOnly: Boolean(this.runtimeState.liveConfig.highSalienceOnly)
       }),
+      presenceController: this.presenceController,
       logger: this.logger
     });
 
@@ -259,10 +287,125 @@ class AgentRuntime {
       }),
       allowAutoGiveBuildMaterials: this.allowAutoGiveBuildMaterials,
       debugBuildPlans: this.debugBuildPlans,
+      presenceController: this.presenceController,
       logger: this.logger
     });
 
     this.registerCommandHandlers();
+  }
+
+  // Mineflayer is already an event emitter — it pushes health changes, damage,
+// mob spawns and deaths as they happen. The runtime previously ignored all of
+// it and polled every 5 seconds instead, which is roughly three times longer
+// than a creeper fuse. Subscribing here is what makes reactions feel instant.
+  attachBotEventHandlers() {
+    const bot = this.botAdapter?.bot;
+    if (!bot || typeof bot.on !== "function") {
+      return false;
+    }
+
+    this.detachBotEventHandlers();
+
+    const react = (reason) => {
+      void this.survivalController?.notify?.(reason).catch((error) => {
+        this.logger.warn?.("[survival] notify failed:", error?.message || error);
+      });
+    };
+
+    const handlers = {
+      // Took damage — the single most urgent signal we get.
+      entityHurt: (entity) => {
+        if (entity === bot.entity) {
+          react("hurt");
+        }
+      },
+      // Health/food changed. Mineflayer emits this on every bar change.
+      health: () => react("health"),
+      // A mob appeared nearby; may or may not be hostile, the controller decides.
+      entitySpawn: (entity) => {
+        if (this.survivalController?.isHostileName?.(entity?.name)) {
+          react("hostile_spawn");
+        }
+      },
+      death: () => react("death"),
+      spawn: () => react("resp")
+    };
+
+    for (const [event, handler] of Object.entries(handlers)) {
+      bot.on(event, handler);
+    }
+
+    this.botEventHandlers = { bot, handlers };
+    this.logger.info?.("[survival] subscribed to bot events (realtime reactions active)");
+    return true;
+  }
+
+  detachBotEventHandlers() {
+    if (!this.botEventHandlers) {
+      return;
+    }
+
+    const { bot, handlers } = this.botEventHandlers;
+
+    try {
+      for (const [event, handler] of Object.entries(handlers)) {
+        bot.removeListener?.(event, handler);
+      }
+    } catch (error) {
+      this.logger.warn?.("[survival] failed to detach bot events:", error?.message || error);
+    }
+
+    this.botEventHandlers = null;
+  }
+
+  // The body acted; record it so the model can talk about it afterwards and the
+  // dashboard can show it. This deliberately does NOT trigger a chat turn —
+  // narrating every swing would flood the child with noise.
+  async handleSurvivalEvent(event) {
+    if (!event) {
+      return;
+    }
+
+    try {
+      const worldContext = this.getWorldContext();
+      if (!worldContext?.worldId) {
+        return;
+      }
+
+      const descriptions = {
+        flee: `Backed off from ${event.mob || "a threat"}`,
+        fight: `Fought ${event.mob || "a hostile mob"}`,
+        eat: "Ate something to recover",
+        died: "Died and respawned"
+      };
+
+      const description = descriptions[event.action] || `Survival: ${event.action}`;
+
+      this.emitRuntimeEvent("survival_action", {
+        action: event.action,
+        reason: event.reason,
+        mob: event.mob,
+        outcome: event.outcome
+      });
+
+      await this.safeRecordEvent({
+        threadId: this.threadId,
+        type: "survival_action",
+        description,
+        actor: this.companionName,
+        location: this.botAdapter.getSnapshot()?.position || null,
+        metadata: {
+          action: event.action,
+          reason: event.reason,
+          mob: event.mob,
+          distance: event.distance,
+          killed: event.outcome?.killed ?? null,
+          ate: event.outcome?.ate ?? null
+        }
+      });
+    } catch (error) {
+      this.logger.warn?.("[survival] failed to record event:", error?.message || error);
+    }
   }
 
   registerCommandHandlers() {
@@ -1097,6 +1240,60 @@ class AgentRuntime {
 
     const classification = classifyConnectionError(error || {});
 
+    // A duplicate-login kick means another process is using this bot's
+    // username. Reconnecting is the worst possible response: it kicks the
+    // other one, which reconnects and kicks us, forever. Two agents fought
+    // this way for ~2200 join/leave cycles in a single run.
+    //
+    // So stop instead. Loudly, and with the fix in the message.
+    if (isDuplicateLoginKick(error || {})) {
+      this.logger.error?.(
+        "[agent] Kicked: another Minecraft session is already logged in as " +
+          `"${this.botAdapter?.config?.username || this.companionName}". ` +
+          "Refusing to reconnect — two copies of the agent will fight forever. " +
+          "Stop the other instance, then restart this one."
+      );
+
+      this.runtimeUnavailable = true;
+      this.reconnectInFlight = false;
+      this.setRuntimeState({
+        lifecycle: "halted",
+        connectionHealth: "duplicate_session",
+        reconnectState: {
+          ...this.runtimeState.reconnectState,
+          status: "halted",
+          lastErrorCode: "duplicate_login"
+        }
+      });
+
+      await this.safeRecordEvent({
+        threadId: this.threadId,
+        type: "minecraft_duplicate_session",
+        description:
+          "Halted: another session is logged in as this bot. Reconnecting would " +
+          "cause an infinite kick loop.",
+        actor: this.companionName,
+        metadata: {
+          errorCode: "duplicate_login",
+          username: this.botAdapter?.config?.username || null
+        }
+      });
+
+      this.emitRuntimeEvent("minecraft_duplicate_session", {
+        errorCode: "duplicate_login"
+      });
+
+      // Resolve the gate so anything awaiting a reconnect does not hang, then
+      // stop the loops rather than retrying.
+      if (typeof this.reconnectResolver === "function") {
+        this.reconnectResolver(false);
+        this.reconnectResolver = null;
+      }
+
+      this.stopBackgroundLoops();
+      return;
+    }
+
     await this.safeRecordEvent({
       threadId: this.threadId,
       type: "minecraft_reconnect_started",
@@ -1169,6 +1366,11 @@ class AgentRuntime {
         this.emitRuntimeEvent("minecraft_reconnect_succeeded", {
           attemptCount: attemptIndex
         });
+
+        // Reconnect swaps the underlying mineflayer bot for a new object, so
+        // the survival listeners were bound to a dead emitter. Re-attach or
+        // the companion silently stops defending itself after any drop.
+        this.attachBotEventHandlers();
 
         return true;
       } catch (error) {
@@ -1386,6 +1588,18 @@ class AgentRuntime {
         });
       }, this.buildWorkerIntervalMs);
     }
+
+    // The "shadow" loop. Presence must keep running even when the model is
+    // idle, mid-build, or has failed to answer — otherwise the bot drifts off
+    // and ends up standing still with no goal.
+    this.presenceController?.start?.();
+
+    // Survival loop: fast, local, and independent of every other loop.
+    this.survivalController?.start?.();
+
+    // Subscribe to mineflayer's own event stream so a hit is answered
+    // immediately rather than at the next poll.
+    this.attachBotEventHandlers();
   }
 
   stopBackgroundLoops() {
@@ -1403,6 +1617,10 @@ class AgentRuntime {
       clearInterval(this.buildWorkerTimer);
       this.buildWorkerTimer = null;
     }
+
+    this.presenceController?.stop?.();
+    this.survivalController?.stop?.();
+    this.detachBotEventHandlers();
   }
 
   async runReflexScan(reason) {
@@ -1605,15 +1823,191 @@ class AgentRuntime {
       return null;
     }
 
+    const payload = job.payload || {};
+
     return {
-      active: job.status === "running",
+      // Bug 4 fix: a paused build is still an active build. Treating "paused"
+      // as inactive let the mutation gate swing open the moment a build
+      // stalled, so the next "build a house" queued a second competing job.
+      active: job.status === "running" || job.status === "paused",
       state: job.status,
       jobId: String(job.id),
       lane: job.type === "build_emergent" ? "emergent" : "template",
       progress: job.progress || 0,
-      feedbackSummary: job.payload?.feedback_summary || null,
-      designReadiness: job.payload?.design_readiness || null
+      feedbackSummary: payload.feedback_summary || null,
+      designReadiness: payload.design_readiness || null,
+      // Surfaced to the prompt so the model can answer "what are you doing?"
+      currentIndex: Number(payload.current_index || 0),
+      style: payload.plan?.style || null,
+      palette: payload.plan?.paletteName || null,
+      size: payload.plan?.size || null,
+      origin: payload.origin || null,
+      lastFailure: payload.last_failure || null,
+      missingMaterials: Array.isArray(payload.missing) ? payload.missing : null,
+      consecutiveNoProgressPauses: Number(payload.consecutive_no_progress_pauses || 0),
+      resumeAt: payload.resume_at || null
     };
+  }
+
+  // "tag this spot as the cave" — remember where the player is standing.
+  async handleTagLocation({ locationIntent, observedSnapshot, turnId }) {
+    // A nameless tag ("tag this spot") asks for a name rather than inventing
+    // one. A place the child named is a place the child will remember.
+    if (!locationIntent.label) {
+      const prompt = "What should I call this spot? Say something like \"tag this as the treehouse\".";
+
+      await this.botAdapter.say(prompt).catch((error) => {
+        this.logger.warn?.("[location] tag prompt failed:", error?.message || error);
+      });
+
+      await this.storeCompanionResponse({
+        reply: { message: prompt, action: { type: "chat" } },
+        execution: { ok: true, awaitingLabel: true },
+        snapshot: observedSnapshot,
+        eventType: "location_tag_awaiting_name",
+        metadata: { trigger: "location_intent" }
+      });
+
+      this.completeTurnTask(turnId);
+      return true;
+    }
+
+    const reply = {
+      message: "",
+      action: { type: "tag_location", label: locationIntent.label }
+    };
+
+    try {
+      const execution = await this.actionExecutor.execute(reply);
+
+      await this.storeCompanionResponse({
+        reply,
+        execution,
+        snapshot: observedSnapshot,
+        eventType: "location_tagged",
+        metadata: {
+          trigger: "location_intent",
+          label: locationIntent.label,
+          position: execution?.actionTarget || null
+        }
+      });
+    } catch (error) {
+      this.logger.warn?.("[location] tagging failed:", error?.message || error);
+      await this.saySafely(`I couldn't save that spot — ${error.message}`);
+    }
+
+    this.completeTurnTask(turnId);
+    return true;
+  }
+
+  // "take me back to the cave" — look the label up and move the player there.
+  async handleGotoLocation({ locationIntent, observedSnapshot, turnId }) {
+    const reply = {
+      message: "",
+      action: { type: "goto_location", label: locationIntent.label }
+    };
+
+    try {
+      const execution = await this.actionExecutor.execute(reply);
+
+      await this.storeCompanionResponse({
+        reply,
+        execution,
+        snapshot: observedSnapshot,
+        eventType: "location_recall",
+        metadata: {
+          trigger: "location_intent",
+          query: locationIntent.label,
+          found: Boolean(execution?.anchor?.found),
+          resolvedLabel: execution?.anchor?.label || null,
+          score: execution?.anchor?.score ?? null
+        }
+      });
+    } catch (error) {
+      this.logger.warn?.("[location] recall failed:", error?.message || error);
+      await this.saySafely(`I couldn't take you there — ${error.message}`);
+    }
+
+    this.completeTurnTask(turnId);
+    return true;
+  }
+
+  async saySafely(text) {
+    if (!text) {
+      return;
+    }
+
+    try {
+      await this.botAdapter.say(text);
+    } catch (error) {
+      this.logger.warn?.("[agent] say failed:", error?.message || error);
+    }
+  }
+
+  async handleBuildResume({ buildStatus, observedSnapshot, laneDecision, turnId }) {
+    // Clear the backoff so the worker picks the job up on its very next tick.
+    // Without this the bot would ignore "keep going" for up to the full
+    // material-delay window (2 minutes), which reads as not listening.
+    const resumed = await this.jobStore.resumeBuildJob(buildStatus.jobId);
+
+    const message = resumed
+      ? `Picking the ${buildStatus.style || "build"} back up — I'm at ${buildStatus.progress || 0}%.`
+      : "I couldn't find that build to continue.";
+
+    await this.botAdapter.say(message).catch((error) => {
+      this.logger.warn?.("[build] resume say failed:", error?.message || error);
+    });
+
+    await this.storeCompanionResponse({
+      reply: { message, action: { type: "resume_build" } },
+      execution: { ok: Boolean(resumed) },
+      snapshot: observedSnapshot,
+      eventType: "build_resumed",
+      metadata: {
+        trigger: "lane_router",
+        jobId: buildStatus.jobId,
+        previousState: buildStatus.state,
+        currentIndex: buildStatus.currentIndex,
+        laneDecision
+      }
+    });
+
+    this.completeTurnTask(turnId);
+    return true;
+  }
+
+  async handleBuildPause({ buildStatus, observedSnapshot, laneDecision, turnId }) {
+    await this.jobStore.pauseJob(
+      buildStatus.jobId,
+      {
+        message: "Paused on player request.",
+        diagnostic_code: "PLAYER_REQUESTED_PAUSE"
+      },
+      new Date(Date.now() + 300000).toISOString(),
+      {}
+    );
+
+    const message = `Holding off on the ${buildStatus.style || "build"}. Say the word when you want me to continue.`;
+
+    await this.botAdapter.say(message).catch((error) => {
+      this.logger.warn?.("[build] pause say failed:", error?.message || error);
+    });
+
+    await this.storeCompanionResponse({
+      reply: { message, action: { type: "pause_build" } },
+      execution: { ok: true },
+      snapshot: observedSnapshot,
+      eventType: "build_paused",
+      metadata: {
+        trigger: "lane_router",
+        jobId: buildStatus.jobId,
+        previousState: buildStatus.state,
+        laneDecision
+      }
+    });
+
+    this.completeTurnTask(turnId);
+    return true;
   }
 
   buildFeedbackPackets({ intentSignal, buildStatus } = {}) {
@@ -1872,7 +2266,11 @@ class AgentRuntime {
             state: buildStatus.state || null,
             progress: Number.isFinite(Number(buildStatus.progress)) ? Number(buildStatus.progress) : null,
             feedbackSummary: buildStatus.feedbackSummary || null,
-            designReadiness: buildStatus.designReadiness || null
+            designReadiness: buildStatus.designReadiness || null,
+            currentIndex: buildStatus.currentIndex ?? null,
+            lastFailure: buildStatus.lastFailure || null,
+            missingMaterials: buildStatus.missingMaterials || null,
+            resumeAt: buildStatus.resumeAt || null
           }
         });
       }
@@ -1908,6 +2306,34 @@ class AgentRuntime {
             designReadiness: laneDecision.readiness
           }
         });
+      }
+
+      // Tagging and recalling places runs BEFORE the model. These are explicit,
+      // unambiguous requests ("tag this spot as the cave", "take me back
+      // there"), and a child who asks to go home should not depend on the
+      // model happening to choose the right action. No LLM call at all.
+      const locationIntent = parseLocationIntent(payload.message);
+      if (locationIntent.kind === "tag") {
+        await this.handleTagLocation({ locationIntent, observedSnapshot, turnId });
+        return;
+      }
+
+      if (locationIntent.kind === "goto") {
+        await this.handleGotoLocation({ locationIntent, observedSnapshot, turnId });
+        return;
+      }
+
+      // "keep going" / "finish it" must act on the job that already exists, not
+      // queue a second one. The paused job keeps its current_index checkpoint,
+      // so resuming picks the build up exactly where it stopped.
+      if (laneDecision?.action === "resume_build" && buildStatus?.jobId) {
+        await this.handleBuildResume({ buildStatus, observedSnapshot, laneDecision, turnId });
+        return;
+      }
+
+      if (laneDecision?.action === "pause_build" && buildStatus?.jobId) {
+        await this.handleBuildPause({ buildStatus, observedSnapshot, laneDecision, turnId });
+        return;
       }
 
       if (laneDecision?.clarification) {
@@ -2097,7 +2523,8 @@ class AgentRuntime {
             eventWindow: this.eventWindow,
             summaryContextLimit: this.summaryContextLimit,
             retryGuidance: guidance || null,
-            feedbackSummary
+            feedbackSummary,
+            buildStatus
           });
         } catch (error) {
           const signature = buildNormalizedFailureSignature({

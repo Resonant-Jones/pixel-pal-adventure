@@ -178,9 +178,20 @@ class LearningStore {
 
     const attempt = toRecordId(attemptId);
     const outcome = toRecordId(outcomeId);
+
+    if (!attempt || !outcome) {
+      // A half-formed edge silently poisons the learning graph, which is what
+      // lets the bot stop repeating a failure. Refuse rather than write junk.
+      return null;
+    }
+
     const edge = {
       thread_id: threadId,
-      world_id: worldId,
+      // learning_edges is SCHEMAFULL and types world_id as string, so the
+      // field must always be present. An explicit null stores NONE and fails
+      // the same check; a sentinel keeps the edge writable and records that
+      // the caller had no world to give.
+      world_id: worldId || "unknown",
       turn_id: turnId,
       attempt_id: String(attempt),
       relation_type: relationType,
@@ -188,6 +199,12 @@ class LearningStore {
     };
 
     const [created] = await this.client.query(
+      // Endpoints must be real RecordId values, not strings. SurrealDB 3.x
+      // rejects a string here with "Cannot execute RELATE statement where
+      // property 'in' is: 'learning_events:...'". NOTE: type::record() is NOT
+      // valid here — the RELATE parser rejects a function call at that
+      // position ("Unexpected token '::'"), so the RecordId objects built by
+      // toRecordId() must survive as-is.
       "RELATE $attempt->learning_edges->$outcome CONTENT $edge RETURN AFTER;",
       {
         attempt,

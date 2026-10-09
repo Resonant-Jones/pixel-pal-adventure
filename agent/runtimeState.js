@@ -45,6 +45,9 @@ function createRuntimeState({
       narrativeReflexEnabled: false,
       highSalienceOnly: true,
       allowMutationDuringBuild: false,
+      // Self-preservation is on by default: a companion that lets itself be
+      // eaten is not much of a companion. Toggle via the control plane.
+      selfPreservationEnabled: true,
       childFriendlyUi: {
         kidModeEnabled: true,
         largeTextEnabled: true,

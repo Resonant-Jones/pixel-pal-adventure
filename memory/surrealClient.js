@@ -40,12 +40,29 @@ function loadSurrealSdk() {
   }
 }
 
+// Normalise a SurrealDB statement result into a flat array of rows.
+//
+// `client.query()` returns one entry per statement: `[[row, row, ...]]`. Both
+// the whole result and a single statement's rows can legitimately reach here,
+// and getting this wrong is silent — a nested array makes every row look like
+// an array, so `row.status` is undefined and callers filter everything away.
 function getStatementRows(statement) {
-  if (Array.isArray(statement)) {
-    return statement;
+  if (!statement) {
+    return [];
   }
 
-  return statement?.result || [];
+  // Already unwrapped rows.
+  if (!Array.isArray(statement)) {
+    return statement.result || [];
+  }
+
+  // `[[rows]]` — the shape client.query() returns for a single statement.
+  if (statement.length === 1 && Array.isArray(statement[0])) {
+    return statement[0];
+  }
+
+  // `[rows]` — already destructured by the caller.
+  return statement;
 }
 
 function isPlainObject(value) {
@@ -154,20 +171,29 @@ class SurrealClient {
     const schema = fs.readFileSync(schemaPath, "utf8");
 
     if (schema.trim()) {
+      let statementCount = 0;
       try {
-        await db.query(schema);
+        const results = await db.query(schema);
+        statementCount = Array.isArray(results) ? results.length : 0;
       } catch (error) {
-        // Schema bootstrap is best-effort. SurrealDB occasionally returns
-        // transaction conflicts when the schema is already applied by another
-        // caller; that's fine — we treat the schema as loaded and move on.
-        // Any *other* schema error is logged but never fatal; the runtime
-        // can still operate against whatever schema is already in place.
-        this.logger.warn?.(
-          `[memory] Schema bootstrap warning (${error?.message || error}); continuing with existing schema if any`
+        // Previously this was a warn-and-continue. That is exactly how the
+        // project shipped six capability audits with an empty database: the
+        // schema silently never applied, every later write failed, and the
+        // only user-visible symptom was a bot that said "I lost the thread."
+        //
+        // A schema that does not apply is not a warning — it means nothing can
+        // be persisted, so nothing the companion does will be remembered.
+        this.logger.error?.(
+          `[memory] Schema bootstrap FAILED (${error?.message || error}). ` +
+            "Nothing can be persisted this session."
         );
-        this.schemaBootstrapped = true;
-        return;
+        this.schemaBootstrapped = false;
+        throw error;
       }
+
+      this.logger.info?.(
+        `[memory] Schema applied (${statementCount} statements).`
+      );
     }
 
     this.schemaBootstrapped = true;

@@ -55,7 +55,7 @@ class JobStore {
 
   async markRunning(jobId, startedAt = toIso()) {
     const [updated] = await this.client.query(
-      "UPDATE $jobId MERGE { status: 'running', started_at: $startedAt, updated_at: $startedAt } RETURN AFTER;",
+      "UPDATE type::record($jobId) MERGE { status: \"running\", started_at: $startedAt, updated_at: $startedAt } RETURN AFTER;",
       {
         jobId,
         startedAt
@@ -72,7 +72,12 @@ class JobStore {
 
     let selected;
     try {
-      selected = await this.client.query(
+      // Must destructure the outer array. `client.query()` returns one entry
+      // per statement — `[[row, row, ...]]`. Assigning the whole result leaves
+      // `jobs` as a single-element array whose only element is an ARRAY, so
+      // every `job.status` reads undefined, the filter drops everything, and
+      // the worker silently returns null while jobs sit in `pending` forever.
+      [selected] = await this.client.query(
         'SELECT * FROM jobs WHERE world_id = $worldId AND type INSIDE ["build_structure", "build_emergent"] AND status INSIDE ["pending", "paused"] ORDER BY created_at ASC LIMIT 20;',
         {
           worldId
@@ -143,7 +148,7 @@ class JobStore {
       updated_at: patch.updated_at || toIso()
     };
 
-    const [updated] = await this.client.query("UPDATE $jobId MERGE $patch RETURN AFTER;", {
+    const [updated] = await this.client.query("UPDATE type::record($jobId) MERGE $patch RETURN AFTER;", {
       jobId,
       patch: payload
     });
@@ -153,7 +158,7 @@ class JobStore {
 
   async completeJob(jobId, result = {}, completedAt = toIso()) {
     const [updated] = await this.client.query(
-      "UPDATE $jobId MERGE { status: 'completed', progress: 100, result: $result, completed_at: $completedAt, updated_at: $completedAt } RETURN AFTER;",
+      "UPDATE type::record($jobId) MERGE { status: \"completed\", progress: 100, result: $result, completed_at: $completedAt, updated_at: $completedAt } RETURN AFTER;",
       {
         jobId,
         result,
@@ -166,7 +171,7 @@ class JobStore {
 
   async pauseJob(jobId, error = {}, resumeAt = toIso(), patch = {}) {
     const updatedAt = toIso();
-    const [updated] = await this.client.query("UPDATE $jobId MERGE $patch RETURN AFTER;", {
+    const [updated] = await this.client.query("UPDATE type::record($jobId) MERGE $patch RETURN AFTER;", {
       jobId,
       patch: {
         ...patch,
@@ -182,12 +187,38 @@ class JobStore {
 
   async failJob(jobId, error = {}, completedAt = toIso()) {
     const [updated] = await this.client.query(
-      "UPDATE $jobId MERGE { status: 'failed', error: $error, completed_at: $completedAt, updated_at: $completedAt } RETURN AFTER;",
+      "UPDATE type::record($jobId) MERGE { status: \"failed\", error: $error, completed_at: $completedAt, updated_at: $completedAt } RETURN AFTER;",
       {
         jobId,
         error,
         completedAt
       }
+    );
+
+    return getStatementRows(updated)[0] || null;
+  }
+
+  // Make a paused job immediately eligible again.
+  //
+  // Resume has to actively clear the backoff, because getNextBuildJob() skips
+  // any job whose resume_at is still in the future. Without this, a child
+  // saying "keep going" would be ignored for up to the full material-delay
+  // window and the bot would look like it had not heard him.
+  async resumeBuildJob(jobId, resumeAt = toIso()) {
+    if (!jobId) {
+      return null;
+    }
+
+    const updatedAt = toIso();
+    const payload = {
+      jobId,
+      resumeAt,
+      updatedAt
+    };
+
+    const [updated] = await this.client.query(
+      'UPDATE type::record($jobId) SET status = "pending", resume_at = $resumeAt, updated_at = $updatedAt WHERE $jobId RETURN AFTER;',
+      payload
     );
 
     return getStatementRows(updated)[0] || null;

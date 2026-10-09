@@ -16,6 +16,7 @@ class ReflexWorker {
     globalCooldownMs = 60000,
     perTriggerCooldownMs = 180000,
     getReflexPolicy = () => ({ enabled: true, highSalienceOnly: false }),
+    presenceController = null,
     logger = console
   }) {
     this.botAdapter = botAdapter;
@@ -28,6 +29,7 @@ class ReflexWorker {
     this.globalCooldownMs = globalCooldownMs;
     this.perTriggerCooldownMs = perTriggerCooldownMs;
     this.getReflexPolicy = getReflexPolicy;
+    this.presenceController = presenceController;
     this.logger = logger;
     this.running = false;
   }
@@ -129,6 +131,10 @@ class ReflexWorker {
       });
       return false;
     } finally {
+      // A reflex ends the task too — without this the bot keeps whatever
+      // pathfinding goal the reflex implied instead of returning to the
+      // child, which is the "stands staring at nothing" symptom.
+      this.presenceController?.endTask?.();
       this.running = false;
     }
   }

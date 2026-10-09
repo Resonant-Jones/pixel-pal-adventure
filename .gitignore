@@ -1,5 +1,11 @@
 .env
 .local/
 node_modules/
+# npm fallback cache: the shared ~/.npm cache on this machine has root-owned
+# entries that break `npm install`, so installs use a project-local cache.
+.npm-cache/
 dashboard/dist/
 dashboard/src-tauri/target/
+
+# local Paper server: binaries, world data, logs, credentials
+minecraft-server/

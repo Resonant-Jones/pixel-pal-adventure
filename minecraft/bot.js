@@ -3,6 +3,7 @@ const { EventEmitter } = require("events");
 const minecraftData = require("minecraft-data");
 const ping = require("minecraft-protocol/src/ping");
 const mineflayer = require("mineflayer");
+const { Vec3 } = require("vec3");
 const { pathfinder, Movements, goals } = require("mineflayer-pathfinder");
 
 const { captureWorldSnapshot } = require("./worldSnapshot");
@@ -137,6 +138,40 @@ function createOperationTimeoutError(operationName, timeoutMs) {
   error.timeoutMs = timeoutMs;
   return error;
 }
+
+// ---------------------------------------------------------------------------
+// Survival constants
+// ---------------------------------------------------------------------------
+
+// Mobs that will attack the companion or the child. Passive animals, villagers,
+// and other players are deliberately absent — the companion must never pick a
+// fight the child did not ask for.
+const HOSTILE_MOBS = new Set([
+  "zombie", "husk", "drowned", "skeleton", "stray", "bogged", "creeper",
+  "spider", "cave_spider", "enderman", "witch", "slime", "magma_cube",
+  "blaze", "ghast", "piglin", "piglin_brute", "hoglin", "zoglin",
+  "wither_skeleton", "phantom", "pillager", "vindicator", "evoker",
+  "ravager", "guardian", "elder_guardian", "shulker", "silverfish",
+  "endermite", "vex", "warden", "breeze"
+]);
+
+// Exploders and ranged mobs you cannot trade hits with safely. Backing off is
+// almost always better than swinging: a creeper detonating next to the child
+// does far more damage than any sword stroke prevents.
+const FLEE_ONLY_MOBS = new Set(["creeper", "ghast", "blaze", "witch", "ravager"]);
+
+// Best-first. Only the first match in inventory is equipped.
+const WEAPON_PRIORITY = [
+  "netherite_sword", "diamond_sword", "iron_sword", "stone_sword", "wooden_sword",
+  "netherite_axe", "diamond_axe", "iron_axe", "stone_axe", "wooden_axe"
+];
+
+const FOOD_PRIORITY = [
+  "golden_apple", "cooked_beef", "cooked_porkchop", "cooked_mutton",
+  "cooked_chicken", "cooked_rabbit", "cooked_salmon", "cooked_cod",
+  "bread", "baked_potato", "apple", "carrot", "melon_slice",
+  "sweet_berries", "dried_kelp"
+];
 
 function normalizeBlockPosition(position) {
   if (!position) {
@@ -1248,6 +1283,286 @@ class MinecraftBotAdapter extends EventEmitter {
       }
     } catch (error) {
       this.logger.warn("[minecraft] Bot quit failed during disconnect:", error.message);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Survival primitives
+  //
+  // These deliberately bypass #withBotOperation. That queue exists to stop two
+  // *tasks* fighting over the bot, but a zombie does not wait in line behind a
+  // build. Getting this wrong is what made the companion stand still and be
+  // eaten: reaction has to preempt whatever it was doing.
+  // -------------------------------------------------------------------------
+
+  getVitals() {
+    const bot = this.bot;
+    if (!bot?.entity) {
+      return null;
+    }
+
+    const pos = bot.entity.position;
+    return {
+      isAlive: true,
+      health: typeof bot.health === "number" ? bot.health : null,
+      food: typeof bot.food === "number" ? bot.food : null,
+      position: pos ? { x: pos.x, y: pos.y, z: pos.z } : null,
+      gameMode: bot.game?.gameMode || null
+    };
+  }
+
+  // Nearest hostile mob within range, or null. Ignores anything with a
+  // different mob name than the known hostile set.
+  findNearestHostile(range = 12) {
+    const bot = this.bot;
+    if (!bot?.entity?.position) {
+      return null;
+    }
+
+    const origin = bot.entity.position;
+    let best = null;
+    let bestDistance = Infinity;
+
+    for (const entity of Object.values(bot.entities || {})) {
+      if (!entity || entity === bot.entity || !entity.position) {
+        continue;
+      }
+
+      const name = String(entity.name || entity.displayName || "").toLowerCase().replace(/^minecraft:/, "");
+      if (!HOSTILE_MOBS.has(name)) {
+        continue;
+      }
+
+      const distance = origin.distanceTo(entity.position);
+      if (distance <= range && distance < bestDistance) {
+        best = { entity, name, distance };
+        bestDistance = distance;
+      }
+    }
+
+    return best;
+  }
+
+  findNearestEntityByName(names, range = 12) {
+    const bot = this.bot;
+    if (!bot?.entity?.position) {
+      return null;
+    }
+
+    const wanted = new Set(names.map((n) => String(n).toLowerCase()));
+    const origin = bot.entity.position;
+    let best = null;
+    let bestDistance = Infinity;
+
+    for (const entity of Object.values(bot.entities || {})) {
+      if (!entity || entity === bot.entity || !entity.position) {
+        continue;
+      }
+
+      const name = String(entity.name || entity.displayName || "").toLowerCase().replace(/^minecraft:/, "");
+      if (!wanted.has(name)) {
+        continue;
+      }
+
+      const distance = origin.distanceTo(entity.position);
+      if (distance <= range && distance < bestDistance) {
+        best = { entity, name, distance };
+        bestDistance = distance;
+      }
+    }
+
+    return best;
+  }
+
+  findInventoryItemLowestDurability(names) {
+    for (const name of names) {
+      const item = this.findInventoryItem(name);
+      if (item) {
+        return item;
+      }
+    }
+
+    return null;
+  }
+
+  async equipBestWeapon() {
+    const item = this.findInventoryItemLowestDurability(WEAPON_PRIORITY);
+    if (!item) {
+      return null;
+    }
+
+    try {
+      await this.bot.equip(item, "hand");
+      return item.name;
+    } catch (error) {
+      this.logger.warn?.("[survival] equip weapon failed:", error?.message || error);
+      return null;
+    }
+  }
+
+  async equipBestFood() {
+    const item = this.findInventoryItemLowestDurability(FOOD_PRIORITY);
+    if (!item) {
+      return null;
+    }
+
+    try {
+      await this.bot.equip(item, "hand");
+      return item.name;
+    } catch (error) {
+      this.logger.warn?.("[survival] equip food failed:", error?.message || error);
+      return null;
+    }
+  }
+
+  // Swing at a specific entity until it dies, leaves range, or we run out of
+  // time. Returns a small report so the caller does not have to guess.
+  async attackEntity(entity, { maxDurationMs = 6000, range = 3.5 } = {}) {
+    const bot = this.bot;
+    if (!bot?.entity || !entity) {
+      return { attacked: false, killed: false, reason: "not_connected" };
+    }
+
+    await this.equipBestWeapon();
+
+    const deadline = Date.now() + maxDurationMs;
+    let swings = 0;
+
+    while (Date.now() < deadline) {
+      const target = bot.entities?.[entity.id];
+      if (!target || !target.isValid) {
+        return { attacked: swings > 0, killed: true, swings, reason: "target_gone" };
+      }
+
+      const distance = bot.entity.position.distanceTo(target.position);
+      if (distance > 24) {
+        return { attacked: swings > 0, killed: false, swings, reason: "target_escaped" };
+      }
+
+      try {
+        if (distance > range) {
+          // Step into range without the pathfinder, which would override the
+          // child's follow goal and strand us mid-fight.
+          await bot.lookAt(target.position.offset(0, target.height ? target.height * 0.8 : 1, 0), true);
+          bot.setControlState("forward", true);
+          await new Promise((resolve) => setTimeout(resolve, 120));
+          bot.setControlState("forward", false);
+          continue;
+        }
+
+        await bot.lookAt(target.position.offset(0, target.height ? target.height * 0.8 : 1, 0), true);
+        bot.attack(target);
+        swings += 1;
+
+        // Match the vanilla attack cooldown so swings actually deal damage.
+        await new Promise((resolve) => setTimeout(resolve, 625));
+      } catch (error) {
+        return { attacked: swings > 0, killed: false, swings, reason: error.message };
+      }
+    }
+
+    return { attacked: swings > 0, killed: false, swings, reason: "timeout" };
+  }
+
+  // Sprint directly away from a threat. Cheaper and more reliable than pathing
+  // when the only goal is "not here".
+  async fleeFrom(position, { durationMs = 2500 } = {}) {
+    const bot = this.bot;
+    if (!bot?.entity?.position || !position) {
+      return { fled: false, reason: "not_connected" };
+    }
+
+    const origin = bot.entity.position;
+
+    try {
+      // Face away and hold sprint-jump. Jumping clears one-block steps, which
+      // is what usually kills an escape attempt in rough terrain.
+      const away = {
+        x: origin.x + (origin.x - position.x),
+        y: origin.y,
+        z: origin.z + (origin.z - position.z)
+      };
+
+      await bot.lookAt(new Vec3(away.x, away.y + 1, away.z), true);
+      bot.setControlState("sprint", true);
+      bot.setControlState("forward", true);
+
+      const deadline = Date.now() + durationMs;
+      while (Date.now() < deadline) {
+        bot.setControlState("jump", true);
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        bot.setControlState("jump", false);
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      }
+
+      return { fled: true };
+    } catch (error) {
+      return { fled: false, reason: error?.message || String(error) };
+    } finally {
+      this.releaseMovementControls();
+    }
+  }
+
+  // Eat whatever is edible. Vanilla only lets you eat below a food threshold,
+  // so a failure here usually just means "not hungry enough".
+  async consumeFood() {
+    const bot = this.bot;
+    if (!bot?.entity) {
+      return { ate: false, reason: "not_connected" };
+    }
+
+    const item = await this.equipBestFood();
+    if (!item) {
+      return { ate: false, reason: "no_food" };
+    }
+
+    try {
+      await bot.consume();
+      return { ate: true, item };
+    } catch (error) {
+      return { ate: false, reason: error?.message || String(error), item };
+    }
+  }
+
+  // Teleport a player to a saved location.
+  //
+  // Requires the bot to be opped (it is, level 4). The coordinates are placed
+  // mid-block (+0.5) so the player lands on top of the block rather than
+  // inside it, which is the difference between arriving and suffocating.
+  async teleportPlayer(username, position) {
+    if (!this.bot) {
+      throw new Error("Bot is not connected.");
+    }
+
+    const target = username || this.config.primaryPlayer;
+    const x = Number(position?.x);
+    const y = Number(position?.y);
+    const z = Number(position?.z);
+
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) {
+      throw new Error("Teleport requires finite x, y, and z coordinates.");
+    }
+
+    const command = `/tp ${target} ${x + 0.5} ${y} ${z + 0.5}`;
+    await this.runCommand(command);
+
+    return { teleported: true, player: target, command, position: { x, y, z } };
+  }
+
+  // Emergency brake. Used when a survival reaction has to take the controls
+  // away from whatever task currently holds them.
+  releaseMovementControls() {
+    const bot = this.bot;
+    if (!bot) {
+      return;
+    }
+
+    for (const control of ["forward", "back", "left", "right", "jump", "sprint", "sneak"]) {
+      try {
+        bot.setControlState(control, false);
+      } catch (_error) {
+        // A disconnected bot throws on control writes; nothing to do.
+      }
     }
   }
 }

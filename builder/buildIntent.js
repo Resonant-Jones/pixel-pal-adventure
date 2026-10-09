@@ -10,6 +10,18 @@ const NEGATION_PATTERN = /\b(?:don't|do not|never|no|not|without|avoid|stop)\b/;
 const HYPOTHETICAL_PATTERN = /\b(?:maybe|later|someday|eventually|perhaps|could|would|might|should|what if|if we)\b/;
 const ANCHOR_REFERENCE_PATTERN = /\b(?:anchor|this anchor|that anchor|the anchor|marked place|target anchor)\b/;
 const STRUCTURE_CUE_PATTERN = /\b(bridge|tower|camp|hut|cabin|house|home|shelter|base|template|blueprint|prebuilt|quick build)\b/;
+// A child nudging a stalled build says "keep going" or "finish it", not
+// "build me a house". Without this, a resume nudge reads as a fresh build
+// request and queues a duplicate job — the reported "forgot what it was
+// doing" behaviour.
+const RESUME_PATTERN =
+  /\b(?:keep going|keep building|carry on|continue|resume|finish it|finish that|go on|carry on building|keep at it|keep working on it|build it|make it|try again|retry)\b/;
+const PAUSE_PATTERN = /\b(?:pause|stop building|hold on|wait|hold up|come back to this)\b/;
+// "here", "near me", "under us" — a kid pointing at the ground and saying
+// "build me a house" means right where they are standing, not "give me GPS
+// coordinates". These phrases confirm the target is the player's position.
+const HERE_PATTERN =
+  /\b(?:here|right here|over here|around here|near me|by me|under us|underneath us|beneath us|at my feet|where i am|where we are)\b/;
 const COORDINATE_PATTERN =
   /\b(?:x\s*(-?\d+)\s*y\s*(-?\d+)\s*z\s*(-?\d+)|at\s+(-?\d+)\s+(-?\d+)\s+(-?\d+)|at\s+(-?\d+)\s*,\s*(-?\d+)\s*,\s*(-?\d+))\b/i;
 
@@ -103,6 +115,23 @@ function classifyBuildRequest(message, { resolvedAnchor = null } = {}) {
   const boundedStructure = hasStructureCue(text);
   const explicitBuildIntent = hasBuildVerb && !hasNegation && !hasHypothetical;
 
+  // No coordinates and no anchor is NOT a reason to refuse. The player is
+  // always standing somewhere, so "build me a house" resolves to a build at
+  // their feet. Previously this forced a clarification loop a 10-year-old has
+  // no way out of: he cannot type "anchor" and does not know what one is.
+  const wantsBuildHere = HERE_PATTERN.test(text);
+  const implicitTarget = explicitBuildIntent && boundedStructure && !hasTarget;
+
+  // Pause wins over resume so "stop, don't keep going" is never read as a nudge.
+  // A bare "stop" is too weak to match PAUSE_PATTERN, so a negation anywhere in
+  // the sentence also suppresses resume — otherwise "don't keep going" is read
+  // as an instruction to continue, which is the exact confusion this guards.
+  const isPause =
+    PAUSE_PATTERN.test(text) ||
+    (RESUME_PATTERN.test(text) && NEGATION_PATTERN.test(text));
+  const isResume =
+    !isPause && RESUME_PATTERN.test(text) && !explicitBuildIntent;
+
   return {
     text,
     hasBuildVerb,
@@ -111,9 +140,22 @@ function classifyBuildRequest(message, { resolvedAnchor = null } = {}) {
     hasStructureCue: boundedStructure,
     target,
     hasTarget,
+    wantsBuildHere,
+    implicitTarget,
+    // The worker resolves "here" to a real position at execution time.
+    targetMode: hasTarget ? "explicit" : "player_position",
     explicitBuildIntent,
-    shouldBuild: explicitBuildIntent && hasTarget && boundedStructure,
-    needsClarification: explicitBuildIntent && (!hasTarget || !boundedStructure)
+    isPauseRequest: isPause,
+    isResumeRequest: isResume,
+    // A resume nudge is actionable even though it names no new structure, so
+    // it must survive the shouldBuild gate and reach the lane router.
+    shouldBuild:
+      (explicitBuildIntent && hasTarget && boundedStructure) || isResume || implicitTarget,
+    shouldResume: isResume,
+    shouldPause: isPause,
+    // A build verb with no recognisable shape is unbuildable no matter how
+    // well-targeted it is, so it always deserves a question — anchor or not.
+    needsClarification: explicitBuildIntent && !boundedStructure && !isResume
   };
 }
 

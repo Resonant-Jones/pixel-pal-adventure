@@ -74,6 +74,17 @@ function classifyActionError(error) {
 function classifyConnectionError(error) {
   const message = String(error?.message || "").toLowerCase();
 
+  // A duplicate-login kick is NOT a transient fault, and treating it as one is
+  // catastrophic: two agents sharing a username each kick the other, every
+  // kick triggers a reconnect, and the pair settle into an infinite mutual-kick
+  // storm. Observed in the wild at ~2200 join/leave cycles.
+  //
+  // This must be checked before the generic "kicked" branch so the specific
+  // cause wins over the category.
+  if (isDuplicateLoginKick(error)) {
+    return { errorCode: "duplicate_login", errorCategory: "fatal", operationSubtype: "disconnect" };
+  }
+
   if (message.includes("kicked")) {
     return { errorCode: "kicked", errorCategory: "connection", operationSubtype: "disconnect" };
   }
@@ -87,6 +98,26 @@ function classifyConnectionError(error) {
   }
 
   return { errorCode: "unknown_error", errorCategory: "unknown", operationSubtype: null };
+}
+
+// True when the server dropped us because the SAME account connected twice.
+//
+// Mineflayer surfaces this as a kick reason string, and the exact wording
+// varies by server software and version, so match on the phrases that are
+// stable rather than one exact sentence.
+function isDuplicateLoginKick(error) {
+  const message = String(error?.message || error || "").toLowerCase();
+
+  const phrases = [
+    "you logged in from another location",
+    "logged in from another location",
+    "you are already connected",
+    "already logged in",
+    "duplicate login",
+    "another location"
+  ];
+
+  return phrases.some((phrase) => message.includes(phrase));
 }
 
 function buildNormalizedFailureSignature({
@@ -131,5 +162,6 @@ module.exports = {
   buildSignatureKey,
   classifyLlmError,
   classifyActionError,
-  classifyConnectionError
+  classifyConnectionError,
+  isDuplicateLoginKick
 };

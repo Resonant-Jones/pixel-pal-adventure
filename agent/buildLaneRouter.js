@@ -10,6 +10,33 @@ function routeBuildLane({
 } = {}) {
   const buildRequest = classifyBuildRequest(message, { resolvedAnchor });
 
+  // A resume nudge ("keep going", "finish it") must re-enter the task lane even
+  // while a build is active — the mutation gate exists to stop a *second* build
+  // from starting, not to stop the current one from continuing.
+  if (buildRequest.shouldResume && buildStatus?.active) {
+    return {
+      lane: "task",
+      buildLane: buildStatus.lane === "emergent" ? "emergent" : "template",
+      reason: "resume_build_request",
+      action: "resume_build",
+      buildStatus
+    };
+  }
+
+  // Pause takes priority over everything else, including the gate.
+  if (buildRequest.shouldPause && buildStatus?.active) {
+    return {
+      lane: "task",
+      buildLane: buildStatus.lane === "emergent" ? "emergent" : "template",
+      reason: "pause_build_request",
+      action: "pause_build",
+      buildStatus
+    };
+  }
+
+  // Bug 4 fix: buildStatus.active now covers "paused" as well as "running",
+  // so a stalled build keeps the gate shut instead of letting a duplicate
+  // structure be queued on top of it.
   if (buildStatus?.active && buildRequest.shouldBuild && !mutationPolicy.allowMutationDuringBuild) {
     return {
       lane: "social",
@@ -19,7 +46,7 @@ function routeBuildLane({
     };
   }
 
-  if (!buildRequest.explicitBuildIntent) {
+  if (!buildRequest.explicitBuildIntent && !buildRequest.shouldResume) {
     return {
       lane: "social",
       reason: buildRequest.hasNegation
@@ -30,13 +57,21 @@ function routeBuildLane({
     };
   }
 
+  if (buildRequest.shouldResume && !buildStatus?.active) {
+    // Nothing to resume — fall back to a social answer rather than inventing
+    // a build the player did not ask for.
+    return {
+      lane: "social",
+      reason: "resume_without_active_build"
+    };
+  }
+
   if (buildRequest.needsClarification) {
     return {
       lane: "social",
-      reason: buildRequest.hasTarget ? "build_requires_bounds" : "build_requires_target",
-      clarification: buildRequest.hasTarget
-        ? "If you want me to build there, tell me what shape to make, like a hut, tower, or bridge."
-        : "If you want me to build, give me a target like an anchor or coordinates."
+      reason: "build_requires_shape",
+      clarification:
+        "Sure — what should I build? A house, a tower, a bridge, or a wall?"
     };
   }
 
@@ -61,8 +96,12 @@ function routeBuildLane({
   return {
     lane,
     buildLane,
-    reason: "build_request",
-    target: buildRequest.target
+    reason: buildRequest.implicitTarget ? "build_here_request" : "build_request",
+    action: "compose_structure",
+    // null means "where the player is standing right now"; the runtime
+    // resolves it to a live position when the job is created.
+    target: buildRequest.target || null,
+    targetMode: buildRequest.targetMode || "player_position"
   };
 }
 

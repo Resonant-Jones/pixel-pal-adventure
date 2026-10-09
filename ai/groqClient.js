@@ -3,7 +3,7 @@ const https = require("https");
 
 const { getGroqConfig, validateGroqConfig } = require("../config/groq");
 
-function postJson(urlString, { headers = {}, body, timeoutMs = 30000 }) {
+function postJson(urlString, { headers = {}, body, timeoutMs = 30000, providerLabel = "Groq" }) {
   return new Promise((resolve, reject) => {
     const url = new URL(urlString);
     const payload = JSON.stringify(body);
@@ -34,21 +34,21 @@ function postJson(urlString, { headers = {}, body, timeoutMs = 30000 }) {
           const statusCode = response.statusCode || 500;
 
           if (statusCode < 200 || statusCode >= 300) {
-            reject(new Error(`Groq request failed (${statusCode}): ${data || "empty response body"}`));
+            reject(new Error(`${providerLabel} request failed (${statusCode}): ${data || "empty response body"}`));
             return;
           }
 
           try {
             resolve(JSON.parse(data));
           } catch (error) {
-            reject(new Error(`Groq returned invalid JSON: ${error.message}`));
+            reject(new Error(`${providerLabel} returned invalid JSON: ${error.message}`));
           }
         });
       }
     );
 
     request.setTimeout(timeoutMs, () => {
-      request.destroy(new Error(`Groq request timed out after ${timeoutMs}ms`));
+      request.destroy(new Error(`${providerLabel} request timed out after ${timeoutMs}ms`));
     });
 
     request.on("error", reject);
@@ -256,6 +256,7 @@ class GroqClient {
   }) {
     const response = await postJson(`${this.config.baseUrl}/chat/completions`, {
       timeoutMs: this.config.timeoutMs,
+      providerLabel: this.config.providerLabel || "Groq",
       headers: {
         Authorization: `Bearer ${this.config.apiKey}`
       },
@@ -263,6 +264,12 @@ class GroqClient {
         model: this.config.model,
         temperature,
         max_tokens: maxTokens,
+        // Provider-specific passthrough (e.g. DeepSeek's `thinking` toggle).
+        // Reasoning models spend part of max_tokens on hidden reasoning before
+        // emitting any visible content, so a tight budget can be consumed
+        // entirely by thinking and return an empty message — which surfaces to
+        // a child as the companion silently ignoring them.
+        ...(this.config.extraBody || {}),
         messages: [
           {
             role: "system",
@@ -279,7 +286,7 @@ class GroqClient {
     const content = normalizeMessageContent(response);
 
     if (!content) {
-      throw new Error("Groq returned no assistant message content.");
+      throw new Error(`${this.config.providerLabel || "Groq"} returned no assistant message content.`);
     }
 
     return {

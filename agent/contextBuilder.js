@@ -25,7 +25,8 @@ async function buildContext({
   feedbackSummary = null,
   operatorInstruction = null,
   spatialReferences = [],
-  allowedActions = DEFAULT_ALLOWED_ACTIONS
+  allowedActions = DEFAULT_ALLOWED_ACTIONS,
+  buildStatus = null
 }) {
   const [recentMessages, recentEvents, recentSummaries, recentReflexEvents] = await Promise.all([
     messageStore.getRecentMessages(threadId, memoryWindow, { worldId }),
@@ -63,7 +64,8 @@ async function buildContext({
       worldSnapshot,
       playerState,
       retryGuidance,
-      feedbackSummary
+      feedbackSummary,
+      buildStatus
     })
   };
 }
