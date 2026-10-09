@@ -101,10 +101,37 @@ check this first.
 
 ### 2.6 Two agents must never share a username
 
-Two Guardians on one account produced **~2200 join/leave cycles and a 1.8 MB
-log** — each kick triggers a reconnect, each reconnect kicks the other.
-`duplicate_login` is classified **fatal**, not transient. `startStack.js` also
-refuses to boot a second Guardian. Keep both guards.
+Two Guardians on one account produce an infinite mutual-kick storm. **Observed
+twice:** ~2,200 join/leave cycles in one run, and **25,186 duplicate-login
+events** in a single 19-second burst on 2026-10-09.
+
+Closing the laptop lid is enough to trigger it. Suspending the process leaves
+the server holding the stale session; on wake both copies reconnect and start
+kicking each other.
+
+The first fix classified `duplicate_login` as fatal — and **it did not work**,
+because it was only ever unit-tested on the classifier, never on the runtime
+sequence. Two defects combined:
+
+1. The `end` listener discarded the kick reason and substituted a generic
+   `Error("Minecraft connection ended.")`, so the classifier could not see a
+   duplicate login at all.
+2. The halt path set `reconnectInFlight = false`, which **cleared the very
+   in-flight guard the next call checks** — so the `end` that fires immediately
+   after every kick sailed past the guard and reconnected. The halt undid itself
+   one tick later.
+
+Now fixed by a sticky `duplicateSessionHalted` latch plus reason propagation
+through `end`. Guarded by `tests/duplicateLoginStorm.test.js`, which drives the
+real `handleConnectionLoss` through the real kicked→halt→end sequence.
+
+> **The lesson generalises:** a green test suite proved nothing here, because
+> the test exercised the classifier while the bug lived in the wiring. When a
+> fix is "already in," reproduce the failure end to end before assuming it was
+> only ever the classifier.
+>
+> Keep both guards: `duplicateSessionHalted` in the runtime, and the
+> `CONTROL_PORT` check in `startStack.js`.
 
 ### 2.7 Floodgate renames the player
 
@@ -127,7 +154,7 @@ name.
 
 ### Verified working
 
-- **21/21 test files pass.** `npm test` → `node tests/run.js` (auto-discovers `tests/*.test.js`).
+- **22/22 test files pass.** `npm test` → `node tests/run.js` (auto-discovers `tests/*.test.js`).
 - **`npm run check` clean** — `tsc --noEmit` plus `node --check` across the tree.
 - SurrealDB schema applies cleanly: 148 statements, 14 tables.
 - DeepSeek returns content (thinking disabled).
@@ -141,6 +168,7 @@ name.
 | **Son joining from the iPad** | Never happened. Geyser installed and listening, but no Bedrock client has ever connected. |
 | **Survival against real mobs** | Unit-tested only. Never fought anything. |
 | **Location tag/recall** | Real DB round-trip proven; never used live by a person. |
+| **Duplicate-login storm** | Root-caused and fixed, but the fix has not yet survived a real lid-close. |
 | **Guardian's death log** | ~dozens of deaths (zombie/phantom/skeleton/creeper). These *predate* the survival controller, so this is untested, not failing. See §6.4. |
 
 Do not describe anything in that table as working. Six prior capability audits

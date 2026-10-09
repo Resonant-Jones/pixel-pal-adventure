@@ -1212,6 +1212,27 @@ class AgentRuntime {
       return;
     }
 
+    // A duplicate-login halt is STICKY, and this guard is what makes it so.
+    //
+    // Every kick fires `kicked` and then `end`. The `kicked` path carries the
+    // real reason and halts correctly — but it clears `reconnectInFlight`,
+    // which lets the `end` that follows immediately slip past the in-flight
+    // guard below. `end` carries no reason at all, so it classifies as a
+    // generic retryable disconnect and reconnects, kicking the other agent,
+    // which reconnects and kicks us. The halt undid itself, and the storm ran
+    // to 25,186 login cycles in one afternoon.
+    //
+    // Latching here means only the first, well-informed call can act. Every
+    // later connection-loss is ignored until this process is restarted.
+    if (this.duplicateSessionHalted) {
+      this.logger.warn?.(
+        "[agent] Ignoring a further connection loss: this instance already halted " +
+          "because another session is using the same username. Restart only after " +
+          "the other instance is stopped."
+      );
+      return;
+    }
+
     this.runtimeUnavailable = true;
     this.connectionInterrupted = true;
     this.setRuntimeState({
@@ -1256,6 +1277,7 @@ class AgentRuntime {
 
       this.runtimeUnavailable = true;
       this.reconnectInFlight = false;
+      this.duplicateSessionHalted = true;
       this.setRuntimeState({
         lifecycle: "halted",
         connectionHealth: "duplicate_session",
@@ -1695,12 +1717,17 @@ class AgentRuntime {
       void this.handleConnectionLoss("bot_error", error);
     });
 
-    this.botAdapter.on("end", () => {
+    this.botAdapter.on("end", (lastReason) => {
       this.setRuntimeState({
         lifecycle: this.shuttingDown ? this.runtimeState.lifecycle : "reconnecting",
         connectionHealth: "disconnected"
       });
-      void this.handleConnectionLoss("end", new Error("Minecraft connection ended."));
+
+      // Carry the adapter's last known reason instead of inventing a generic
+      // one. A duplicate-login kick is only recognisable by its wording, and
+      // this path is the one that runs after every kick.
+      const detail = lastReason || "Minecraft connection ended.";
+      void this.handleConnectionLoss("end", new Error(detail));
     });
   }
 

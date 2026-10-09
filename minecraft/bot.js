@@ -496,6 +496,7 @@ class MinecraftBotAdapter extends EventEmitter {
 
     bot.on("error", (error) => {
       this.logger.error("[minecraft] Bot error:", error);
+      this.lastDisconnectReason = error?.message || String(error);
       this.emit("botError", error);
 
       if (!isSettled()) {
@@ -508,6 +509,7 @@ class MinecraftBotAdapter extends EventEmitter {
       const message = typeof reason === "string" ? reason : JSON.stringify(reason);
       const error = new Error(`Minecraft connection was kicked: ${message}`);
       this.logger.error("[minecraft] Bot kicked:", message);
+      this.lastDisconnectReason = message;
       this.emit("botError", error);
 
       if (!isSettled()) {
@@ -519,8 +521,16 @@ class MinecraftBotAdapter extends EventEmitter {
     bot.on("end", () => {
       this.bot = null;
       this.movements = null;
-      this.emit("end");
-      this.logger.warn("[minecraft] Connection ended.");
+
+      // `end` fires immediately after every `kicked`, carrying no reason of its
+      // own. Hand the last known reason along, otherwise the consumer sees a
+      // bare "connection ended" and cannot tell a duplicate-login kick from an
+      // ordinary disconnect — which is the difference between halting and
+      // reconnecting into a fight.
+      const lastReason = this.lastDisconnectReason || "Minecraft connection ended.";
+      this.lastDisconnectReason = null;
+      this.emit("end", lastReason);
+      this.logger.warn("[minecraft] Connection ended:", lastReason);
 
       if (!isSettled()) {
         markSettled();
