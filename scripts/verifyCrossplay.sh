@@ -66,8 +66,11 @@ if [ -f "$SERVER_DIR/logs/latest.log" ]; then
     bad "no Geyser startup line in latest.log — did the plugins actually load?"
   fi
 
-  if grep -qiE 'Floodgate.*(started|loaded|key)' "$SERVER_DIR/logs/latest.log"; then
-    ok "Floodgate reports itself started"
+  # Floodgate logs under a lowercase [floodgate] tag and phrases startup as
+  # "Loading server plugin" / "Enabling floodgate", never as "started".
+  if grep -qiE '\[floodgate\].*(Loading server plugin|Enabling|boot Floodgate|key)' "$SERVER_DIR/logs/latest.log"; then
+    ok "Floodgate reports itself loaded"
+    grep -iE '\[floodgate\].*(Loading server plugin|Enabling|boot Floodgate)' "$SERVER_DIR/logs/latest.log" | tail -n 2 | sed 's/^/      /'
   else
     bad "no Floodgate startup line in latest.log"
   fi
@@ -94,13 +97,30 @@ head_ "5. Effective configuration"
 GEYSER_CFG="$PLUGINS/Geyser-Spigot/config.yml"
 if [ -f "$GEYSER_CFG" ]; then
   ok "Geyser config present"
-  AUTH="$(awk '/^remote:/{r=1;next} /^  auth-type:/{if(r){print $2;exit}}' "$GEYSER_CFG" 2>/dev/null)"
-  AUTH2="$(awk '/^[a-z-]+:/{sect=$1} /^  auth-type:/{if(sect=="/remote:"||sect=="/java:"){print $2;exit}}' "$GEYSER_CFG" 2>/dev/null)"
-  RESOLVED="${AUTH:-${AUTH2:-unknown}}"
+  # `auth-type` sits under either `remote:` (older) or `java:` (current). It is
+  # the only key by that name in the file, so a scoped grep is both simpler and
+  # far less breakable than trying to track the section header.
+  RESOLVED="$(grep -E '^[[:space:]]+auth-type:' "$GEYSER_CFG" 2>/dev/null | tail -n 1 | sed -E 's/.*auth-type:[[:space:]]*//' | tr -d '"'"'" | tr -d '\r')"
   if [ "$RESOLVED" = "floodgate" ]; then
     ok "auth-type is floodgate (Bedrock players need no Java account)"
+  elif [ -z "$RESOLVED" ]; then
+    bad "could not find auth-type in the Geyser config"
   else
     bad "auth-type is '$RESOLVED' — should be 'floodgate' for a Bedrock-only player"
+  fi
+
+  # Config on disk is not config in memory. Geyser reads these values at boot,
+  # so an edit made after the last server start has not taken effect yet.
+  # latest.log is created when the server starts, so its mtime is a good proxy
+  # for "when did the current instance boot".
+  if [ -f "$SERVER_DIR/logs/latest.log" ]; then
+    CFG_MTIME="$(stat -f %m "$GEYSER_CFG" 2>/dev/null || echo 0)"
+    BOOT_MTIME="$(stat -f %m "$SERVER_DIR/logs/latest.log" 2>/dev/null || echo 0)"
+    if [ "$CFG_MTIME" -gt "$BOOT_MTIME" ]; then
+      bad "config.yml was edited AFTER this server instance booted — restart Paper for it to apply"
+    else
+      ok "config.yml is older than this boot, so these values are live"
+    fi
   fi
   BP="$(awk '/^bedrock:/{f=1;next} /^  port:/{if(f){print $2;exit}}' "$GEYSER_CFG" 2>/dev/null)"
   if [ -n "$BP" ]; then

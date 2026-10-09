@@ -1,0 +1,350 @@
+# HANDOFF — minecraft-ai-companion
+
+**Written:** 2026-10-09
+**For:** another agent picking this up cold
+**Author's note:** you have no prior context on this project. Section 2 is the
+part that will save you the most time. Read it before touching anything.
+
+---
+
+## 1. What this is
+
+An AI Minecraft companion for a 10-year-old. The goal is a "shadow" that plays
+alongside him — remembers conversations and significant places across worlds,
+builds with him, has dry wit, and eventually supports turn-based voice.
+
+**The player plays Bedrock on an iPad.** That single constraint has driven
+almost every architectural decision, because mineflayer is Java-only. Geyser +
+Floodgate translate Bedrock↔Java on the local Paper server, so the kid's client
+never changes and the bot stays mineflayer-native.
+
+The child is a **co-designer, not a passenger**. Involve him in decisions and
+ask for his feedback *while he is playing* — post-hoc design conversations are
+much worse than a kid saying "why did it do that?" in the moment.
+
+### Repo
+
+| | |
+|---|---|
+| Project root | `/Users/resonant_jones/Keep/MineCraft_Companion/minecraft-ai-companion` |
+| Git remote | `git@github.com:Resonant-Jones/pixel-pal-adventure.git` |
+| Branch | `codex/Feedback-Middleware` |
+| HEAD at handoff | `0705ab0` |
+
+The **outer** directory `MineCraft_Companion/` is **not** a git repo. Only the
+inner `minecraft-ai-companion/` is. The `package.json` at the outer level is a
+local convenience wrapper and is untracked — it will not survive a fresh clone.
+
+### Ignored on purpose
+
+`memory-bank/` and `.github/*.chatmode.md` are **VS Code Copilot artifacts**.
+Do not read, maintain, or "clean up" them. They are noise for this project.
+
+Also gitignored: `.env`, `minecraft-server/`, `.local/`, `.npm-cache/`,
+`node_modules/`.
+
+---
+
+## 2. Landmines — read before you debug anything
+
+These are hard-won. Each one cost hours. Skipping ahead to "optimizing" or
+"cleaning up" in these areas will reintroduce a bug that is invisible when it
+happens.
+
+### 2.1 SurrealDB 3.x record IDs have angle brackets
+
+`surreal` 3.x returns record IDs like `⟨abc123⟩`. This code stores them as
+strings. Therefore **every UPDATE targeted by an id must wrap it**:
+
+```js
+await db.query(`UPDATE type::record($jobId) SET ...`, { jobId })
+```
+
+**Also: never write single-quoted SurrealQL strings.** Use double quotes.
+
+> Symptom when broken: `UPDATE $jobId` hard-throws on every call. This looks
+> exactly like "the database is empty" or "protocol drift". Neither.
+
+### 2.2 Query results nest differently than you expect
+
+SurrealDB returns `[[rows]]` from `db.query()` with multiple statements and
+`[rows]` with one. `getStatementRows()` in `memory/surrealClient.js` flattens
+**both**. Do not "simplify" it to handle only one shape.
+
+### 2.3 `getNextBuildJob` — check the destructuring
+
+In `memory/jobStore.js` this function destructures its **outer array**. This
+was the actual reason five queued builds were never picked up. Before blaming
+the network, the protocol, or the database, read this function carefully.
+
+### 2.4 The three misdiagnoses (so you don't repeat them)
+
+This database problem was misdiagnosed three times in a row before being found:
+1. "The database is empty."
+2. "Protocol break after the SurrealDB upgrade."
+3. "I broke `RELATE` myself." *(I had. Reverted.)*
+
+The real cause was §2.3. **When something is mysteriously empty or broken,
+verify the query is returning rows before theorizing about why.**
+
+### 2.5 `deepseek-flash` is a reasoning model
+
+Reasoning tokens consume `max_tokens` and return **empty content**. The symptom
+is a model that appears lobotomized. The fix is in `config/deepseek.js`:
+
+```js
+extraBody: { thinking: { type: "disabled" } }
+```
+
+Verified live: 12 tokens returned vs 136 consumed. If replies go empty again,
+check this first.
+
+### 2.6 Two agents must never share a username
+
+Two Guardians on one account produced **~2200 join/leave cycles and a 1.8 MB
+log** — each kick triggers a reconnect, each reconnect kicks the other.
+`duplicate_login` is classified **fatal**, not transient. `startStack.js` also
+refuses to boot a second Guardian. Keep both guards.
+
+### 2.7 Floodgate renames the player
+
+Floodgate 2.x defaults `username-prefix` to `"."`. A player configured as
+`Panda_Nuggetz` arrives at Paper as **`.Panda_Nuggetz`**.
+
+This silently killed follow, facing, tag-location and `/tp`, because lookup was
+an exact key match returning `null` with no error anywhere. Now resolved
+tolerantly via `resolvePlayerEntity()` in `minecraft/bot.js`. **Keep both
+directions** — it also has to work if the prefix is set to `""`.
+
+### 2.8 `/tp` is resolved by the server, not by us
+
+It needs the **resolved server-side name**. It does not accept the configured
+name.
+
+---
+
+## 3. Current state
+
+### Verified working
+
+- **21/21 test files pass.** `npm test` → `node tests/run.js` (auto-discovers `tests/*.test.js`).
+- **`npm run check` clean** — `tsc --noEmit` plus `node --check` across the tree.
+- SurrealDB schema applies cleanly: 148 statements, 14 tables.
+- DeepSeek returns content (thinking disabled).
+- Geyser live on UDP 19132; Floodgate generated its `key.pem`.
+- Database round-trips verified against the live instance.
+
+### NOT verified — and this distinction matters
+
+| Thing | Status |
+|---|---|
+| **Son joining from the iPad** | Never happened. Geyser installed and listening, but no Bedrock client has ever connected. |
+| **Survival against real mobs** | Unit-tested only. Never fought anything. |
+| **Location tag/recall** | Real DB round-trip proven; never used live by a person. |
+| **Guardian's death log** | ~dozens of deaths (zombie/phantom/skeleton/creeper). These *predate* the survival controller, so this is untested, not failing. See §6.4. |
+
+Do not describe anything in that table as working. Six prior capability audits
+all reported `Live Validation Confidence: 0/5` — the recurring failure mode of
+this project is claiming things work because the code reads correctly.
+
+### Immediate blocker
+
+Geyser's `auth-type` was `online`, which would have **rejected your son
+outright** (he has no Java account). Changed to `floodgate` on disk, but
+**Paper has not been restarted since**. The verifier detects this:
+
+```bash
+./scripts/verifyCrossplay.sh     # currently reports: config edited AFTER boot
+```
+
+---
+
+## 4. Architecture
+
+```
+minecraft-ai-companion/
+├── agent/        runtime orchestration (15 files) — the conductor
+├── ai/           LLM clients (4) — GroqClient is reused for DeepSeek
+├── builder/      build pipeline (9) — structureCompiler → buildWorker
+├── memory/       SurrealDB stores (11)
+├── minecraft/    mineflayer adapter (2)
+├── reflex/       autonomous chatter (4)
+├── survival/     deterministic combat (1)
+├── control/      local HTTP control plane on 8787
+├── config/       provider config (5)
+└── scripts/      startAgent / startStack / startPaperServer
+```
+
+**Key architectural decision — survival contains no LLM.** `survivalController.js`
+runs a deterministic priority ladder (critical → threat → hungry → idle). The
+model narrates *afterwards*. It never participates in the reaction path. Do not
+"improve" this by routing combat decisions through the model — latency would
+make the bot die.
+
+**Creepers, ghasts, blazes, witches and ravagers are always fled**, never meleed.
+
+**Location tag/recall runs before the model** — zero LLM calls, refuses to guess
+below a fuzzy-match threshold of 40.
+
+### Runtime topology
+
+```
+iPad (Bedrock) ──UDP 19132──> Geyser+Floodgate ──┐
+                                                 ├──> Paper 1.21.11 (25565)
+Guardian (mineflayer bot) ─────TCP 25565─────────┘
+                    │
+                    ├──> SurrealDB 3.0.4 (127.0.0.1:8001)
+                    └──> DeepSeek API (deepseek-flash)
+```
+
+---
+
+## 5. Environment
+
+```bash
+cd /Users/resonant_jones/Keep/MineCraft_Companion/minecraft-ai-companion
+
+npm test        # 21 test files
+npm run check   # typecheck + syntax
+
+node scripts/startStack.js   # bring up Surreal + Paper + Guardian
+./scripts/restartPaper.sh    # graceful Paper restart (SIGTERM, world-saving)
+./scripts/verifyCrossplay.sh # read-only: can a Bedrock client reach us right now?
+```
+
+`restartPaper.sh --dry-run` prints what it would do and changes nothing.
+
+### Ports — do not change these casually
+
+| Port | What | Note |
+|---|---|---|
+| 25565 | Paper (Java) | |
+| 19132 | Geyser (Bedrock UDP) | |
+| 8001 | SurrealDB | **Not 8000.** Another local service (`Whoosh'd`) owns 8000. Never kill it to reclaim the port. |
+| 8787 | Agent control plane | Presence = Guardian is running. |
+
+LAN address is derived from the default route (currently `192.168.4.26`).
+Tailscale is also up for off-LAN access.
+
+### Sandbox constraints you will hit
+
+These are environment restrictions, not bugs. Do not fight them:
+
+- Writes succeed **only inside this project directory**. `/tmp` and other home
+  paths fail with `Operation not permitted` (macOS TCC).
+- `ps` and `pgrep` are blocked.
+- **Paper cannot be signalled by the agent.** It is spawned detached with stdin
+  ignored, and RCON is disabled, so there is no way to ask it to stop. This is
+  why `restartPaper.sh` exists and must be run by the human.
+- No DeepSeek/Pi subagent workers — a lockfile EPERM blocks all worker
+  invocation.
+
+### Security rules
+
+- **Never print secrets.** `.env` holds the DeepSeek API key and the control-plane
+  bearer token. Grep for keys by *variable name*, never dump the file.
+- `.env` is gitignored. Verify with `git check-ignore -v .env` before any commit.
+- `minecraft-server/plugins/floodgate/key.pem` is a **credential** — it is what
+  binds a Bedrock client to this server. Do not commit or share it. It lives
+  under the gitignored `minecraft-server/`.
+- Install plugins **hash-verified** against the official GeyserMC build API.
+
+---
+
+## 6. Prioritized next work
+
+### 6.1 Finish crossplay — *blocking, do first*
+
+The whole reason Geyser was installed. One restart away.
+
+1. `./scripts/restartPaper.sh`
+2. `./scripts/verifyCrossplay.sh` — must be fully green.
+3. Son joins on the iPad: **Play → Servers → Add Server**, address = the LAN IP
+   the verifier prints, port **19132**.
+4. **Watch what he does.** He plays explore/adventure, not constant action;
+   puzzles; wants action "spiky and manageable" — bursts, not attrition.
+
+**Acceptance:** a Bedrock client connects and appears in the player list. Note
+the name it arrives under (`.Panda_Nuggetz` or bare) — that confirms §2.7 in the
+real world.
+
+**Then ask him:** what should Guardian be called, what should it remember, and
+what should it do when he's not talking to it. Capture the answers verbatim.
+
+### 6.2 M2 — semantic memory
+
+Currently zero. The companion remembers build jobs and location tags but has no
+semantic recall across sessions. This is the difference between "a bot that
+reacts" and "a companion that knows you".
+
+Direction: embeddings/vector search over conversation history, cross-world
+landmarks, and a notion of which memories are worth keeping. The schema already
+has `learningStore` groundwork; `memory-bank/` is **not** where this lives.
+
+### 6.3 Nightly "compound over time" work
+
+The user wants a world that is *always on*, doing scheduled work that
+accumulates rather than free-roaming autonomy. Unspecified so far — this needs
+design, not just implementation.
+
+Related: the always-on deployment target is undecided. Options are the second Mac
+as a home server, or supervised on this machine. Note `caffeinate -s` is
+recommended for always-on but **is not implemented**.
+
+### 6.4 Guardian is dying constantly
+
+`logs/latest.log` is full of `Guardian was slain by Zombie`, `shot by Skeleton`,
+`blown up by Creeper`.
+
+These predate the survival controller, so this is untested rather than broken.
+But there is a real design problem underneath: Guardian is opped at level 4,
+which **bypasses `spawn-protection=16`**, so the bot fights in the open at night
+with nothing between it and a creeper. The moment it starts dying in front of
+your son is the moment it matters.
+
+Prefer observing it live over pre-optimizing. Fix what actually kills it.
+
+### 6.5 Cross-dimension teleport
+
+`/tp` is same-dimension only. `goto_location` to a Nether or End anchor fails.
+
+### 6.6 Voice (M4)
+
+Turn-based STT/TTS. Entirely unbuilt. Geyser improves the odds that this is even
+practical on Bedrock, since the protocol path is now bridged.
+
+---
+
+## 7. Ground rules
+
+1. **Demonstrate milestones live. Never infer them from source that reads
+   correctly.** This is the project's repeated failure mode.
+2. **Surgical refactors.** mineflayer, SurrealDB and the agent/memory/ai split
+   are deliberate. Preserve them.
+3. **Deterministic where it matters.** Reaction paths get no LLM.
+4. **Frontend is the user's own work.** Do not hand them built UI components.
+   Provide specs, layout, interaction rules and constraints — they will build it.
+5. **Model/provider changes are `.env` + restart.** No hot reload, deliberately.
+6. **Before any destructive git command, capture `git status --short` as a
+   baseline.** Use path-scoped operations only — never a tree-wide
+   `git restore --source=HEAD --staged --worktree .`. Doing that once silently
+   destroyed six files of uncommitted work, unrecoverably.
+7. **Sleep handling:** Ctrl+C before closing the lid.
+
+---
+
+## 8. Provenance of the claims above
+
+Every "verified" claim in §3 was checked by running something:
+
+| Claim | How |
+|---|---|
+| 21/21 tests | `npm test` |
+| typecheck clean | `npm run check` |
+| Geyser listening | `verifyCrossplay.sh` → `lsof` UDP 19132 |
+| Floodgate key | `verifyCrossplay.sh` → file exists |
+| DeepSeek content | live API call, 12 tokens vs 136 |
+| DB round-trip | live SurrealDB instance |
+
+Claims in the "NOT verified" table are **not** evidence of failure — they are
+the absence of evidence. Treat them as untested.
