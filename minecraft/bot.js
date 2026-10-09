@@ -10,6 +10,55 @@ const { captureWorldSnapshot } = require("./worldSnapshot");
 
 const { GoalBlock, GoalFollow, GoalNear } = goals;
 
+// Floodgate 2.x prefixes Bedrock usernames with "." by default, so a player
+// configured as "Panda_Nuggetz" actually reaches Paper as ".Panda_Nuggetz".
+// An exact-key lookup returns null for that, and every dependent behaviour —
+// follow, face, tag-the-here, teleport — quietly degrades. So resolution tries
+// the configured name first, then the known Floodgate prefixes.
+//
+// This also has to work when `username-prefix` is set to "" instead, which is
+// why both directions are attempted rather than blindly prepending a dot.
+const FLOODGATE_USERNAME_PREFIXES = [".", "*", "+", "-"];
+
+function playerNameCandidates(username) {
+  if (typeof username !== "string") {
+    return [];
+  }
+
+  const name = username.trim();
+
+  if (!name) {
+    return [];
+  }
+
+  const candidates = [name];
+  const alreadyPrefixed = FLOODGATE_USERNAME_PREFIXES.some(
+    (prefix) => name.startsWith(prefix) && name.length > prefix.length
+  );
+
+  if (alreadyPrefixed) {
+    candidates.push(name.slice(1));
+  } else {
+    for (const prefix of FLOODGATE_USERNAME_PREFIXES) {
+      candidates.push(`${prefix}${name}`);
+    }
+  }
+
+  return candidates;
+}
+
+function resolvePlayerEntity(bot, username) {
+  for (const candidate of playerNameCandidates(username)) {
+    const entity = bot?.players?.[candidate]?.entity;
+
+    if (entity) {
+      return { name: candidate, entity };
+    }
+  }
+
+  return { name: null, entity: null };
+}
+
 function normalizeMinecraftVersion(version) {
   if (version === undefined || version === null || version === "") {
     return undefined;
@@ -260,7 +309,8 @@ function resolveLookTarget(bot, target) {
   }
 
   if (typeof target === "string") {
-    const entity = bot.players?.[target]?.entity || null;
+    const { entity } = resolvePlayerEntity(bot, target);
+
     return entity ? entity.position.offset(0, entity.height || 1.6, 0) : null;
   }
 
@@ -494,7 +544,14 @@ class MinecraftBotAdapter extends EventEmitter {
   }
 
   getPlayerEntity(username) {
-    return this.bot?.players?.[username]?.entity || null;
+    return resolvePlayerEntity(this.bot, username).entity;
+  }
+
+  // The name the server actually knows this player by. Server-side commands
+  // such as `/tp` must use this, not the configured name, or they target a
+  // player that does not exist.
+  getServerPlayerName(username) {
+    return resolvePlayerEntity(this.bot, username).name;
   }
 
   async followPlayer(username = this.config.primaryPlayer) {
@@ -1543,10 +1600,15 @@ class MinecraftBotAdapter extends EventEmitter {
       throw new Error("Teleport requires finite x, y, and z coordinates.");
     }
 
-    const command = `/tp ${target} ${x + 0.5} ${y} ${z + 0.5}`;
+    // `/tp` is resolved by the server, not by us, so it needs the name the
+    // server actually has on file (Floodgate may have prefixed it). When the
+    // player is offline there is nothing to resolve against, so fall back to
+    // the configured name rather than sending a literal "null".
+    const serverName = this.getServerPlayerName(target) || target;
+    const command = `/tp ${serverName} ${x + 0.5} ${y} ${z + 0.5}`;
     await this.runCommand(command);
 
-    return { teleported: true, player: target, command, position: { x, y, z } };
+    return { teleported: true, player: serverName, command, position: { x, y, z } };
   }
 
   // Emergency brake. Used when a survival reaction has to take the controls
@@ -1569,5 +1631,8 @@ class MinecraftBotAdapter extends EventEmitter {
 
 module.exports = {
   MinecraftBotAdapter,
-  resolveSupportedMinecraftVersion
+  resolveSupportedMinecraftVersion,
+  playerNameCandidates,
+  resolvePlayerEntity,
+  FLOODGATE_USERNAME_PREFIXES
 };
