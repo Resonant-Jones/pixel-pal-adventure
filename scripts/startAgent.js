@@ -206,13 +206,28 @@ async function main() {
     // always allowed; only *concurrent* building needs this flag.
     isBuildMutationAllowed: () => {
       const state = runtime?.getRuntimeState?.();
+
       if (!state) {
+        console.warn("[build-gate] DENIED — runtime state unavailable");
         return false;
       }
+
+      const observed = state.buildStatus?.state ?? null;
+
       if (state.liveConfig?.allowMutationDuringBuild) {
         return true;
       }
-      return !(state.buildStatus?.state === "running" || state.buildStatus?.state === "paused");
+
+      const allowed = !(observed === "running" || observed === "paused");
+
+      // Logged every time because this gate silently denied EVERY build in
+      // this project and left no trace anywhere. The state it reads is worth
+      // seeing when a build request is refused.
+      console.log(
+        `[build-gate] ${allowed ? "ALLOWED" : "DENIED"} — buildStatus.state=${observed}`
+      );
+
+      return allowed;
     },
     getPresenceController: () => runtime?.presenceController || null,
     primaryPlayer: runtimeConfig.primaryPlayer,
