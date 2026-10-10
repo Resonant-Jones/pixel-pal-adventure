@@ -430,6 +430,16 @@ class MinecraftBotAdapter extends EventEmitter {
           `[minecraft] ${bot.username} spawned on ${this.config.host}:${this.config.port}`
         );
 
+        // Apply the world rules this companion is designed for.
+        //
+        // Guardian is opped, so it can set these itself — no console access
+        // required, and they survive a restart without anyone remembering.
+        //
+        // keepInventory matters most: a first session lost five inventories in
+        // two and a half minutes to creeper, skeleton and zombie, which for a
+        // ten-year-old reads as the game being broken rather than as survival.
+        void this.applyStartupGamerules(bot);
+
         this.emit("spawn", this.getSnapshot());
 
         if (!settled) {
@@ -438,6 +448,33 @@ class MinecraftBotAdapter extends EventEmitter {
         }
       });
     });
+  }
+
+  // World rules this companion expects, applied on every spawn.
+  //
+  // Kept here rather than in a manual setup step because the operator has no
+  // console: Guardian is opped, so it can set them itself, and it means the
+  // rules survive a restart or a fresh world without anyone remembering.
+  //
+  // Best-effort by design. A failure must never block the bot from spawning.
+  async applyStartupGamerules(bot) {
+    const rules = [
+      { command: "/gamerule keepInventory true", label: "keepInventory" },
+      { command: "/gamerule doDaylightCycle true", label: "doDaylightCycle" },
+      { command: "/gamerule naturalRegeneration true", label: "naturalRegeneration" }
+    ];
+
+    for (const rule of rules) {
+      try {
+        await this.runCommand(rule.command);
+        this.logger.info?.(`[minecraft] gamerule ${rule.label} applied`);
+      } catch (error) {
+        this.logger.warn?.(
+          `[minecraft] could not apply ${rule.label}:`,
+          error?.message || error
+        );
+      }
+    }
   }
 
   #wireLifecycle(bot, reject, isSettled, markSettled) {
