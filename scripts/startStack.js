@@ -219,9 +219,21 @@ async function startSurreal() {
 
 function printBanner() {
   const lan = lanAddress();
-  const geyserInstalled =
-    fs.existsSync(SERVER_DIR) &&
-    fs.readdirSync(SERVER_DIR).some((name) => /^geyser.*\.jar$/i.test(name));
+
+  // Look in plugins/, not SERVER_DIR — the jars are one level down. This used to
+  // scan SERVER_DIR itself, so it reported "Geyser is not installed yet" even
+  // with Geyser, Floodgate and ViaVersion all sitting in plugins/, and told the
+  // operator to install something that was already installed.
+  const pluginsDir = path.join(SERVER_DIR, "plugins");
+  const pluginJars = fs.existsSync(pluginsDir) ? fs.readdirSync(pluginsDir) : [];
+
+  const geyserInstalled = pluginJars.some((name) => /^geyser.*\.jar$/i.test(name));
+  const floodgateInstalled = pluginJars.some((name) => /^floodgate.*\.jar$/i.test(name));
+
+  // Geyser alone is not enough: without Floodgate a Bedrock player needs a paid
+  // Java account to get in. Report the two states separately rather than
+  // implying crossplay works when it cannot.
+  const crossplayReady = geyserInstalled && floodgateInstalled;
 
   console.log("");
   console.log(`${C.bold}${C.cyan}  Guardian is live.${C.reset}`);
@@ -231,14 +243,22 @@ function printBanner() {
 
   console.log("");
   console.log(`  ${C.bold}Bedrock / iPad${C.reset}`);
-  if (geyserInstalled && lan) {
+  if (crossplayReady && lan) {
     console.log(`    Servers → Add Server → ${C.cyan}${lan}${C.reset}  port ${C.cyan}${BEDROCK_PORT}${C.reset}`);
+    console.log(`    ${C.dim}via Geyser + Floodgate. No Java account needed.${C.reset}`);
+  } else if (geyserInstalled && !floodgateInstalled && lan) {
+    console.log(`    ${C.yellow}Floodgate is missing.${C.reset} Add floodgate-spigot.jar to`);
+    console.log(`    minecraft-server/plugins/ and restart, or a Bedrock player will be`);
+    console.log(`    asked for a paid Java account. Then connect to ${C.cyan}${lan}${C.reset} port ${C.cyan}${BEDROCK_PORT}${C.reset}.`);
   } else if (!geyserInstalled) {
     console.log(`    ${C.yellow}Geyser is not installed yet.${C.reset} Drop Geyser-Spigot.jar and`);
     console.log(`    Floodgate.jar into minecraft-server/plugins/ and restart.`);
     if (lan) {
       console.log(`    Then connect to ${C.cyan}${lan}${C.reset} port ${C.cyan}${BEDROCK_PORT}${C.reset}.`);
     }
+  } else if (!lan) {
+    console.log(`    ${C.yellow}No LAN address found.${C.reset} Geyser is ready, but the iPad needs`);
+    console.log(`    this machine's address on port ${BEDROCK_PORT}.`);
   }
 
   console.log("");
