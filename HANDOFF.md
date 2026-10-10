@@ -7,6 +7,49 @@ part that will save you the most time. Read it before touching anything.
 
 ---
 
+## Campaign checkpoint — 2026-10-09
+
+The active goal is **Guardian's First Real Adventure**: two observed 30-minute
+Bedrock/iPad sessions, including one after a stack restart, with working chat,
+follow/stop, saved-location recall, controlled survival, and the child's verbatim
+feedback. The parent said the iPad sessions will happen later; prepare code and
+the play checklist now. **The campaign is not complete.**
+
+Current source baseline is `7e53c73` on `codex/Feedback-Middleware`. The campaign
+changes are uncommitted. No production services were restarted during this work,
+and no provider API request was made. Frontend components were left alone.
+
+Preparation changes:
+
+- Shared player-name resolution now covers adapter events, runtime chat/direct
+  commands, first greeting, presence, and world snapshots. Exact online names
+  take precedence if both bare and prefixed candidates exist.
+- `stop following` cancels the dynamic path goal and releases movement controls
+  immediately, then remains in effect through presence ticks and task completion.
+- Survival can abort an ongoing fight/eating action for urgent danger, owns
+  movement until the threat clears (including cooldowns), and releases controls
+  afterward. Dangerous
+  flee-only mobs take priority over a closer melee target. Interrupted builds
+  pause with their checkpoint and `SURVIVAL_INTERRUPTED` diagnostics.
+- Duplicate login is classified even during a reconnect attempt. Back-to-back
+  loss events share one guarded retry; stale socket events cannot discard the
+  replacement. Halts preserve their visible status. Ordinary recovery restarts
+  the background loops and stops at configured attempt limits. Paper's translated
+  `multiplayer.disconnect.duplicate_login` reason is recognized; English-only
+  classification missed this actual 1.21.11 packet during an isolated rehearsal.
+- Default observation and model context are player/world/thread scoped. Saved
+  locations check ownership and refuse cross-dimension recall. Unowned legacy
+  anchors/summaries remain stored but are excluded from automatic recall.
+- The restart job query uses double-quoted SurrealQL values. The crossplay
+  verifier reports local prerequisites and runtime authentication uncertainty,
+  rather than treating an append-only log's mtime as boot time.
+
+See `documents/documentation/operator/operator-guide.md` for the two-session
+checklist, parent-only recovery/duplicate test, evidence format, and model data
+boundary. Keep all remaining live gates explicit.
+
+---
+
 ## 1. What this is
 
 An AI Minecraft companion for a 10-year-old. The goal is a "shadow" that plays
@@ -152,38 +195,74 @@ name.
 
 ## 3. Current state
 
-### Verified working
+### Verified in campaign preparation
 
-- **22/22 test files pass.** `npm test` → `node tests/run.js` (auto-discovers `tests/*.test.js`).
-- **`npm run check` clean** — `tsc --noEmit` plus `node --check` across the tree.
-- SurrealDB schema applies cleanly: 148 statements, 14 tables.
-- DeepSeek returns content (thinking disabled).
-- Geyser live on UDP 19132; Floodgate generated its `key.pem`.
-- Database round-trips verified against the live instance.
+- **27/27 test files pass.** `npm test` auto-discovers `tests/*.test.js`.
+- **`npm run check` passes** (TypeScript plus source syntax checks).
+- `npm run verify:memory`: a synthetic location survives an actual isolated
+  SurrealDB process restart; player/thread/world/dimension boundaries hold;
+  a running build retains its checkpoint and is selected after restart.
+  This uses a temporary database, not the family's stored data.
+- `npm run verify:adventure`: production adapter/runtime methods connect to
+  their own cached Paper 1.21.11 on a free loopback port in a fresh flat world.
+  A synthetic Java player observes physical follow/stop and actual tag/recall
+  teleportation. A controlled zombie fight is interrupted for a creeper;
+  server-observed retreat exceeds eight blocks without a death. Threat removal
+  releases controls. An ordinary kick reconnects, and Paper's actual translated
+  duplicate-login packet halts the runtime without another login attempt during
+  a bounded observation window. These are isolated Java-server results: memory
+  and model responses are synthetic; no Geyser, iPad, family world, or provider
+  request participates. The script preserves source hashes/results/console
+  output under `.local/campaign-adventure-proof-*` and removes its own cached
+  binaries/world only after its test server stops.
+- Simulated raw mineflayer events exercise production adapter/runtime wiring:
+  ordinary disconnect recovery, bounded exhaustion, duplicate kick followed by
+  end, duplicate kick during retry, and stale socket events after recovery.
+- Survival tests exercise real controller/adapter methods through the runtime's
+  event handlers during an active fight, including a farther-away creeper and
+  critical health. These regression tests supplement the isolated mob encounter;
+  they do not prove behavior in the family's world.
+- Fresh local crossplay check: **11 checks passed, 0 failed, 1 unverified**.
+  Paper listens on TCP 25565; Geyser listens on UDP 19132; plugin startup lines
+  and Floodgate key presence were checked. Disk auth-type is `floodgate`.
+
+The prior handoff's DeepSeek content and family-DB round-trip evidence were not
+rerun in this campaign preparation. Do not describe them as fresh verification.
+
+Latest isolated adventure receipt: `.local/campaign-adventure-proof-WhLHCs/`
+(`results.json`, `proof-context.json`, `console.log`), recorded at
+2026-10-09 22:36 EDT / 2026-10-10 02:36 UTC. Stop drift was 0.33 blocks across
+30 physics ticks, corroborated by the second client. The interrupted fight
+retreated 8.53 server-observed blocks with health 20 and zero deaths. Recovery
+used one attempt; duplicate halt kept Guardian at two total connection attempts
+(initial plus recovery) during an 821 ms no-retry window. The scoped regression
+tests also exercise repeated loss events after halt. Receipt source hashes
+match the current uncommitted runtime code. Both fresh-world rehearsal runs
+stopped their own servers and removed their generated worlds/caches.
 
 ### NOT verified — and this distinction matters
 
 | Thing | Status |
 |---|---|
-| **Son joining from the iPad** | Never happened. Geyser installed and listening, but no Bedrock client has ever connected. |
-| **Survival against real mobs** | Unit-tested only. Never fought anything. |
-| **Location tag/recall** | Real DB round-trip proven; never used live by a person. |
-| **Duplicate-login storm** | Root-caused and fixed, but the fix has not yet survived a real lid-close. |
-| **Guardian's death log** | ~dozens of deaths (zombie/phantom/skeleton/creeper). These *predate* the survival controller, so this is untested, not failing. See §6.4. |
+| Son joining from the iPad | No live session observed; parent will arrange it later. |
+| Two 30-minute play sessions | Neither completed or recorded. |
+| Survival in the family's world | Regression and isolated flat-world encounter passed; iPad play remains unobserved. |
+| Location tag/recall by a person | Isolated DB restart and actual synthetic Java-player teleport passed; child use remains unobserved. |
+| Duplicate-login halt on the family server/lid-close | Simulated wiring and actual isolated Paper kick passed; family-server/lid-close proof pending. |
+| Effective Geyser authentication | Disk configuration confirmed; runtime mode unproven until fresh startup/client login. |
+| Child's design feedback | No answers captured yet. |
 
-Do not describe anything in that table as working. Six prior capability audits
-all reported `Live Validation Confidence: 0/5` — the recurring failure mode of
-this project is claiming things work because the code reads correctly.
+### Immediate next step
 
-### Immediate blocker
+At the fresh check, Guardian's HTTP control plane on 8787 was not reachable;
+Paper and Geyser remained running. The edited source is therefore not claimed
+as running in the family's world. Start one Guardian from the updated checkout
+for the next session. Use the parent's graceful restart script if Paper must
+reload its configuration. Then prove the iPad login and the play checklist.
 
-Geyser's `auth-type` was `online`, which would have **rejected your son
-outright** (he has no Java account). Changed to `floodgate` on disk, but
-**Paper has not been restarted since**. The verifier detects this:
-
-```bash
-./scripts/verifyCrossplay.sh     # currently reports: config edited AFTER boot
-```
+A log append changes `latest.log`'s mtime, so that timestamp cannot prove a
+restart or active authentication configuration. `verifyCrossplay.sh` deliberately
+keeps this unverified; exit 0 means local prerequisites passed, not iPad success.
 
 ---
 
@@ -232,7 +311,9 @@ Guardian (mineflayer bot) ─────TCP 25565─────────┘
 ```bash
 cd /Users/resonant_jones/Keep/MineCraft_Companion/minecraft-ai-companion
 
-npm test        # 21 test files
+npm test        # 27 test files
+npm run verify:memory # isolated real SurrealDB restart proof (synthetic data)
+npm run verify:adventure # isolated Paper physics/runtime rehearsal (synthetic Java player)
 npm run check   # typecheck + syntax
 
 node scripts/startStack.js   # bring up Surreal + Paper + Guardian
@@ -286,7 +367,8 @@ These are environment restrictions, not bugs. Do not fight them:
 The whole reason Geyser was installed. One restart away.
 
 1. `./scripts/restartPaper.sh`
-2. `./scripts/verifyCrossplay.sh` — must be fully green.
+2. `./scripts/verifyCrossplay.sh` — local checks must pass; runtime auth remains
+   explicitly unverified until the successful iPad login.
 3. Son joins on the iPad: **Play → Servers → Add Server**, address = the LAN IP
    the verifier prints, port **19132**.
 4. **Watch what he does.** He plays explore/adventure, not constant action;
@@ -361,9 +443,10 @@ practical on Bedrock, since the protocol path is now bridged.
 
 ---
 
-## 8. Provenance of the claims above
+## 8. Original handoff provenance
 
-Every "verified" claim in §3 was checked by running something:
+These are the original handoff's checks, retained as historical provenance.
+The campaign checkpoint and §3 distinguish fresh checks from earlier evidence:
 
 | Claim | How |
 |---|---|

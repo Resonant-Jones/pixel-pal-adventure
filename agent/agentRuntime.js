@@ -1,3 +1,4 @@
+const { matchesPlayerName } = require("../minecraft/playerIdentity");
 const { buildContext, buildAdventureSummaryContext } = require("./contextBuilder");
 const { CommandService } = require("./commandService");
 const { parseBuildRequest } = require("../builder/requestParser");
@@ -20,7 +21,7 @@ const {
   classifyConnectionError,
   isDuplicateLoginKick
 } = require("./retrySignatures");
-const { formatAnchorSummary } = require("../memory/anchorStore");
+const { formatAnchorSummary, anchorBelongsTo } = require("../memory/anchorStore");
 const {
   RETRY_DOMAINS,
   RETRY_TERMINAL_OUTCOMES,
@@ -181,6 +182,7 @@ class AgentRuntime {
     this.runtimeUnavailable = false;
     this.connectionInterrupted = false;
     this.reconnectInFlight = null;
+    this.duplicateSessionHalted = false;
     this.reconnectGate = null;
     this.reconnectResolver = null;
     this.reconnectMaxAttempts = reconnectConfig.maxAttempts || 5;
@@ -376,7 +378,7 @@ class AgentRuntime {
         flee: `Backed off from ${event.mob || "a threat"}`,
         fight: `Fought ${event.mob || "a hostile mob"}`,
         eat: "Ate something to recover",
-        died: "Died and respawned"
+        died: "Died"
       };
 
       const description = descriptions[event.action] || `Survival: ${event.action}`;
@@ -984,7 +986,7 @@ class AgentRuntime {
     }
 
     const anchor = await this.anchorStore.getAnchor(anchorId);
-    if (!anchor) {
+    if (!anchorBelongsTo(anchor, { ...this.getWorldContext(), threadId: this.threadId, primaryPlayer: this.primaryPlayer })) {
       return null;
     }
 
@@ -1043,6 +1045,9 @@ class AgentRuntime {
         type: "point",
         source: "player_position",
         payload: {
+          taggedBy: this.primaryPlayer,
+          threadId: this.threadId,
+          dimension: this.botAdapter.bot?.game?.dimension || "overworld",
           position
         }
       });
@@ -1053,6 +1058,9 @@ class AgentRuntime {
         type: "facing",
         source: "look_direction",
         payload: {
+          taggedBy: this.primaryPlayer,
+          threadId: this.threadId,
+          dimension: this.botAdapter.bot?.game?.dimension || "overworld",
           origin: position,
           direction: snapshot.lookVector || { x: 0, y: 0, z: 1 },
           maxDistance: command.maxDistance || null
@@ -1065,6 +1073,9 @@ class AgentRuntime {
         type: "point",
         source: "marker_block",
         payload: {
+          taggedBy: this.primaryPlayer,
+          threadId: this.threadId,
+          dimension: this.botAdapter.bot?.game?.dimension || "overworld",
           position
         }
       });
@@ -1075,6 +1086,9 @@ class AgentRuntime {
         type: "area",
         source: "area_corners",
         payload: {
+          taggedBy: this.primaryPlayer,
+          threadId: this.threadId,
+          dimension: this.botAdapter.bot?.game?.dimension || "overworld",
           cornerA: command.cornerA,
           cornerB: command.cornerB
         }
@@ -1174,7 +1188,8 @@ class AgentRuntime {
   getWorldContext() {
     return {
       worldId: this.currentWorld?.world_id || null,
-      sessionId: this.currentSession?.session_id || null
+      sessionId: this.currentSession?.session_id || null,
+      threadId: this.threadId
     };
   }
 
@@ -1255,10 +1270,6 @@ class AgentRuntime {
       });
     }
 
-    if (this.reconnectInFlight) {
-      return;
-    }
-
     const classification = classifyConnectionError(error || {});
 
     // A duplicate-login kick means another process is using this bot's
@@ -1276,7 +1287,6 @@ class AgentRuntime {
       );
 
       this.runtimeUnavailable = true;
-      this.reconnectInFlight = false;
       this.duplicateSessionHalted = true;
       this.setRuntimeState({
         lifecycle: "halted",
@@ -1316,40 +1326,52 @@ class AgentRuntime {
       return;
     }
 
-    await this.safeRecordEvent({
-      threadId: this.threadId,
-      type: "minecraft_reconnect_started",
-      description: `Reconnect started (${reason})`,
-      actor: this.companionName,
-      location: this.botAdapter.getSnapshot().position,
-      snapshot: this.botAdapter.getSnapshot(),
-      metadata: {
-        reconnect: {
-          status: "started",
-          reason,
-          errorCode: classification.errorCode,
-          errorCategory: classification.errorCategory
+    if (this.reconnectInFlight) return this.reconnectInFlight;
+    this.stopBackgroundLoops();
+    // Install the guard before the first asynchronous event write. Kicked and
+    // end can arrive back to back, and recording an event must not open a race.
+    this.reconnectInFlight = Promise.resolve().then(async () => {
+      await this.safeRecordEvent({
+        threadId: this.threadId,
+        type: "minecraft_reconnect_started",
+        description: `Reconnect started (${reason})`,
+        actor: this.companionName,
+        location: this.botAdapter.getSnapshot().position,
+        snapshot: this.botAdapter.getSnapshot(),
+        metadata: {
+          reconnect: {
+            status: "started",
+            reason,
+            errorCode: classification.errorCode,
+            errorCategory: classification.errorCategory
+          }
         }
-      }
-    });
-    this.emitRuntimeEvent("minecraft_reconnect_started", {
-      attemptCount: this.runtimeState.reconnectState.attemptCount,
-      maxAttempts: this.reconnectMaxAttempts,
-      reason
-    });
+      });
+      this.emitRuntimeEvent("minecraft_reconnect_started", {
+        attemptCount: this.runtimeState.reconnectState.attemptCount,
+        maxAttempts: this.reconnectMaxAttempts,
+        reason
+      });
 
-    this.reconnectInFlight = this.runReconnectLoop(reason).finally(() => {
+      if (this.duplicateSessionHalted || this.shuttingDown) return false;
+      return this.runReconnectLoop(reason);
+    }).finally(() => {
       this.reconnectInFlight = null;
     });
+    return this.reconnectInFlight;
   }
 
   async runReconnectLoop(reason) {
     let lastError = null;
 
     for (let attemptIndex = 1; attemptIndex <= this.reconnectMaxAttempts; attemptIndex += 1) {
+      if (this.duplicateSessionHalted || this.shuttingDown) return false;
       try {
+        await this.botAdapter.disconnect?.();
         await this.botAdapter.connect();
+        if (this.duplicateSessionHalted || this.shuttingDown) return false;
         await this.initializeWorldContext();
+        if (this.duplicateSessionHalted || this.shuttingDown) return false;
         this.runtimeUnavailable = false;
         this.connectionInterrupted = false;
         this.setRuntimeState({
@@ -1392,10 +1414,15 @@ class AgentRuntime {
         // Reconnect swaps the underlying mineflayer bot for a new object, so
         // the survival listeners were bound to a dead emitter. Re-attach or
         // the companion silently stops defending itself after any drop.
-        this.attachBotEventHandlers();
+        this.startBackgroundLoops();
 
         return true;
       } catch (error) {
+        if (isDuplicateLoginKick(error)) {
+          await this.handleConnectionLoss("reconnect_kicked", error);
+          return false;
+        }
+        if (this.duplicateSessionHalted || this.shuttingDown) return false;
         lastError = error;
         this.setRuntimeState({
           reconnectState: {
@@ -1406,7 +1433,7 @@ class AgentRuntime {
           }
         });
         const delayMs = this.computeReconnectDelay(attemptIndex);
-        if (delayMs > 0) {
+        if (delayMs > 0 && attemptIndex < this.reconnectMaxAttempts) {
           await new Promise((resolve) => setTimeout(resolve, delayMs));
         }
       }
@@ -1685,7 +1712,7 @@ class AgentRuntime {
     });
 
     this.botAdapter.on("chat", (payload) => {
-      if (payload.username === this.primaryPlayer) {
+      if (this.isPrimaryPlayer(payload.username)) {
         this.reflexClassifier.markPrimaryActivity();
       }
 
@@ -1693,7 +1720,7 @@ class AgentRuntime {
     });
 
     this.botAdapter.on("entityMoved", (payload) => {
-      if (payload.username === this.primaryPlayer) {
+      if (this.isPrimaryPlayer(payload.username)) {
         this.reflexClassifier.markPrimaryActivity();
       }
     });
@@ -1711,6 +1738,7 @@ class AgentRuntime {
     });
 
     this.botAdapter.on("botError", (error) => {
+      if (this.duplicateSessionHalted) return;
       this.setRuntimeState({
         connectionHealth: "degraded"
       });
@@ -1718,6 +1746,7 @@ class AgentRuntime {
     });
 
     this.botAdapter.on("end", (lastReason) => {
+      if (this.duplicateSessionHalted) return;
       this.setRuntimeState({
         lifecycle: this.shuttingDown ? this.runtimeState.lifecycle : "reconnecting",
         connectionHealth: "disconnected"
@@ -1737,7 +1766,7 @@ class AgentRuntime {
         return;
       }
 
-      if (payload.username === this.primaryPlayer) {
+      if (this.isPrimaryPlayer(payload.username)) {
         await this.firstGreet.deliver(this.botAdapter, payload);
       }
 
@@ -1812,6 +1841,10 @@ class AgentRuntime {
     }
   }
 
+  isPrimaryPlayer(username) {
+    return matchesPlayerName(this.botAdapter.bot, this.primaryPlayer, username);
+  }
+
   shouldObserve(payload) {
     if (!payload?.username) {
       return false;
@@ -1825,7 +1858,7 @@ class AgentRuntime {
       return false;
     }
 
-    return true;
+    return this.respondToAllPlayers || this.isPrimaryPlayer(payload.username);
   }
 
   shouldRespond(payload) {
@@ -1837,7 +1870,7 @@ class AgentRuntime {
       return true;
     }
 
-    return payload.username === this.primaryPlayer || payload.directMention;
+    return this.isPrimaryPlayer(payload.username) || Boolean(payload.directMention);
   }
 
   async getActiveBuildStatus(worldId) {
@@ -2072,7 +2105,7 @@ class AgentRuntime {
   }
 
   getDirectCommand(payload) {
-    if (payload?.username !== this.primaryPlayer) {
+    if (!this.isPrimaryPlayer(payload?.username)) {
       return null;
     }
 
@@ -2544,6 +2577,7 @@ class AgentRuntime {
             spatialReferences: resolvedAnchor?.anchor ? [formatAnchorSummary(resolvedAnchor.anchor)] : [],
             primaryPlayer: this.primaryPlayer,
             companionName: identityProfile.displayName,
+            storedCompanionName: this.companionName,
             role: identityProfile.role,
             personality: identityProfile.personality,
             memoryWindow: this.memoryWindow,
@@ -2967,6 +3001,7 @@ class AgentRuntime {
       threadId: this.threadId,
       worldId: worldContext.worldId,
       companionName: identityProfile.displayName,
+      storedCompanionName: this.companionName,
       primaryPlayer: this.primaryPlayer,
       summaryWindow: this.summaryWindow,
       summaryEventWindow: this.eventWindow * 2
@@ -3000,6 +3035,7 @@ class AgentRuntime {
         observedChatCount: coveredObservedChatCount,
         summaryWindow: this.summaryWindow,
         trigger: "periodic_distillation",
+        primaryPlayer: this.primaryPlayer,
         llmProvider: this.llmProvider
       }
     });

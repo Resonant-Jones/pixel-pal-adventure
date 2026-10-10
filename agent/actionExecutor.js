@@ -1,6 +1,7 @@
 const { compileStructure } = require("../builder/structureCompiler");
 const { normalizeStyleName } = require("../builder/styleProfiles");
 const { findBestLabelMatch } = require("./locationIntent");
+const { anchorBelongsTo } = require("../memory/anchorStore");
 
 function sanitizeChat(text) {
   return String(text || "")
@@ -88,6 +89,7 @@ class ActionExecutor {
     anchorStore = null,
     getWorldContext,
     isBuildMutationAllowed = () => false,
+    getPresenceController = () => null,
     primaryPlayer = "Sage",
     companionName = "Guardian",
     allowAutoGiveBuildMaterials = false,
@@ -99,6 +101,7 @@ class ActionExecutor {
     this.anchorStore = anchorStore;
     this.getWorldContext = getWorldContext;
     this.isBuildMutationAllowed = isBuildMutationAllowed;
+    this.getPresenceController = getPresenceController;
     this.primaryPlayer = primaryPlayer;
     this.companionName = companionName;
     this.allowAutoGiveBuildMaterials = allowAutoGiveBuildMaterials;
@@ -189,11 +192,13 @@ class ActionExecutor {
       case "follow_player": {
         const targetPlayer = action.player || action.targetPlayer || this.primaryPlayer;
         await this.botAdapter.followPlayer(targetPlayer);
+        this.getPresenceController()?.resume();
         execution.actionTarget = targetPlayer;
         break;
       }
 
       case "stop_following": {
+        this.getPresenceController()?.hold();
         await this.botAdapter.stopFollowing();
         execution.actionTarget = action.player || this.primaryPlayer;
         break;
@@ -376,6 +381,7 @@ class ActionExecutor {
           payload: {
             position,
             taggedBy: this.primaryPlayer,
+            threadId: worldContext.threadId,
             dimension: this.botAdapter.bot?.game?.dimension || "overworld"
           },
           createdAt: now,
@@ -402,7 +408,9 @@ class ActionExecutor {
         }
 
         const worldContext = this.getWorldContext();
-        const anchors = (await this.anchorStore.listAnchors(worldContext?.worldId)) || [];
+        if (!worldContext?.worldId) throw new Error("Cannot recall a location before world context is ready.");
+        const anchors = ((await this.anchorStore.listAnchors(worldContext.worldId)) || [])
+          .filter((anchor) => anchorBelongsTo(anchor, { ...worldContext, primaryPlayer: this.primaryPlayer }));
         const match = findBestLabelMatch(query, anchors);
 
         if (!match) {
@@ -421,6 +429,11 @@ class ActionExecutor {
         const position = match.anchor.payload?.position;
         if (!position) {
           throw new Error(`"${match.anchor.label}" has no saved position.`);
+        }
+
+        const dimension = this.botAdapter.bot?.game?.dimension || "overworld";
+        if (match.anchor.payload?.dimension && match.anchor.payload.dimension !== dimension) {
+          throw new Error(`"${match.anchor.label}" is in another dimension. Return there before recalling it.`);
         }
 
         const result = await this.botAdapter.teleportPlayer(this.primaryPlayer, position);

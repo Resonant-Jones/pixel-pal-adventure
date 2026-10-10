@@ -79,6 +79,11 @@ class SurvivalController {
 
     this.timer = null;
     this.busy = false;
+    this.activeAction = null;
+    this.actionAbort = null;
+    this.movementLease = null;
+    this.rerunRequested = false;
+    this.stopped = false;
     this.lastAction = null;
     this.stats = { fights: 0, kills: 0, flees: 0, meals: 0, deaths: 0 };
   }
@@ -91,7 +96,10 @@ class SurvivalController {
       return { ok: false, reason: "no_bot", vitals: null, threat: null };
     }
 
-    const threat = this.botAdapter.findNearestHostile?.(this.thresholds.threatRange) || null;
+    const dangerous = this.botAdapter.findNearestHostile?.(this.thresholds.threatRange, { fleeOnly: true });
+    const threat = dangerous && this.constructor.shouldFleeOnly(dangerous.name)
+      ? dangerous
+      : this.botAdapter.findNearestHostile?.(this.thresholds.threatRange) || null;
 
     return { ok: true, vitals, threat };
   }
@@ -197,7 +205,7 @@ class SurvivalController {
 
   // --- action -------------------------------------------------------------
 
-  async act(action) {
+  async act(action, signal) {
     const now = Date.now();
 
     try {
@@ -208,7 +216,8 @@ class SurvivalController {
 
         const threatPosition = action.threat?.entity?.position;
         const result = await this.botAdapter.fleeFrom(threatPosition, {
-          durationMs: action.urgent ? 3500 : 2500
+          durationMs: action.urgent ? 3500 : 2500,
+          signal
         });
 
         this.record(action, result);
@@ -222,7 +231,8 @@ class SurvivalController {
         this.stats.fights += 1;
 
         const result = await this.botAdapter.attackEntity(action.threat.entity, {
-          maxDurationMs: 6000
+          maxDurationMs: 6000,
+          signal
         });
 
         if (result?.killed) {
@@ -235,7 +245,7 @@ class SurvivalController {
 
       if (action.action === "eat") {
         this.cooldowns.eatUntil = now + DEFAULTS.eatCooldownMs;
-        const result = await this.botAdapter.consumeFood();
+        const result = await this.botAdapter.consumeFood({ signal });
 
         if (result?.ate) {
           this.stats.meals += 1;
@@ -279,26 +289,54 @@ class SurvivalController {
   // --- loop ---------------------------------------------------------------
 
   async tick() {
-    if (!this.enabled || this.busy) {
+    if (!this.enabled || this.stopped) {
+      return null;
+    }
+
+    if (this.busy) {
+      const assessment = this.assess();
+      const urgent = assessment.ok && (
+        (assessment.threat && this.shouldFlee(assessment.threat, assessment.vitals)) ||
+        (this.activeAction === "fight" && this.isCritical(assessment.vitals))
+      );
+      if (urgent && ["fight", "eat"].includes(this.activeAction)) {
+        this.rerunRequested = true;
+        this.actionAbort?.abort();
+      }
       return null;
     }
 
     this.busy = true;
 
     try {
-      const assessment = this.assess();
-      const decision = this.decide(assessment);
-
-      if (decision.action === "none") {
-        return null;
-      }
-
-      return await this.act(decision);
+      let result = null;
+      do {
+        this.rerunRequested = false;
+        const decision = this.decide(this.assess());
+        if (decision.action === "none") break;
+        if (!this.movementLease) this.movementLease = this.botAdapter.beginSurvival?.() || null;
+        this.activeAction = decision.action;
+        this.actionAbort = new AbortController();
+        result = await this.act(decision, this.actionAbort.signal);
+      } while (this.rerunRequested && this.enabled && !this.stopped);
+      return result;
     } catch (error) {
       this.logger.warn?.("[survival] tick failed:", error?.message || error);
       return null;
     } finally {
+      this.actionAbort = null;
+      this.activeAction = null;
       this.busy = false;
+      // Cooldown is a rate limit, not permission to walk back into a threat.
+      // Keep movement until the next assessment finds the encounter over.
+      let threatRemains = false;
+      if (this.enabled && !this.stopped && this.movementLease) {
+        try {
+          const assessment = this.assess();
+          threatRemains = assessment.ok && Boolean(assessment.threat);
+        } catch (_) { /* release on an unavailable bot */ }
+      }
+      if (!threatRemains) this.releaseMovement();
     }
   }
 
@@ -311,6 +349,8 @@ class SurvivalController {
     }
 
     if (reason === "death") {
+      this.rerunRequested = false;
+      this.actionAbort?.abort();
       this.stats.deaths += 1;
       this.lastAction = { type: "survival_action", action: "died", reason, at: new Date().toISOString() };
       try {
@@ -325,6 +365,7 @@ class SurvivalController {
   }
 
   start() {
+    this.stopped = false;
     if (this.timer) {
       return this.timer;
     }
@@ -343,19 +384,31 @@ class SurvivalController {
   }
 
   stop() {
+    this.stopped = true;
+    this.rerunRequested = false;
+    this.actionAbort?.abort();
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;
     }
-    this.botAdapter?.releaseMovementControls?.();
+    if (!this.busy) this.releaseMovement();
   }
 
   setEnabled(value) {
     this.enabled = Boolean(value);
     if (!this.enabled) {
-      this.botAdapter?.releaseMovementControls?.();
+      this.rerunRequested = false;
+      this.actionAbort?.abort();
+      if (!this.busy) this.releaseMovement();
     }
     return this.enabled;
+  }
+
+  releaseMovement() {
+    if (this.movementLease) {
+      this.botAdapter.endSurvival?.(this.movementLease);
+      this.movementLease = null;
+    }
   }
 
   getStats() {

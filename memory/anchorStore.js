@@ -1,6 +1,15 @@
 const crypto = require("crypto");
 
 const { getStatementRows } = require("./surrealClient");
+const { playerNameCandidates } = require("../minecraft/playerIdentity");
+
+function anchorBelongsTo(anchor, { worldId, primaryPlayer, threadId } = {}) {
+  if (!worldId || !primaryPlayer || anchor?.worldId !== worldId) return false;
+  if (!playerNameCandidates(primaryPlayer).includes(anchor.payload?.taggedBy)) return false;
+  // Old player tags carry taggedBy but predate threadId. Keep those readable
+  // by that same player; never silently adopt an unowned operator anchor.
+  return !anchor.payload?.threadId || anchor.payload.threadId === threadId;
+}
 
 function toRecord(anchor = {}) {
   return {
@@ -122,5 +131,6 @@ class AnchorStore {
 
 module.exports = {
   AnchorStore,
+  anchorBelongsTo,
   formatAnchorSummary
 };

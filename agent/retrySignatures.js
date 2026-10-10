@@ -109,6 +109,10 @@ function isDuplicateLoginKick(error) {
   const message = String(error?.message || error || "").toLowerCase();
 
   const phrases = [
+    // Paper 1.21.11 sends a translated NBT chat component rather than the
+    // rendered English sentence. The adapter preserves it as JSON text.
+    "multiplayer.disconnect.duplicate_login",
+    "multiplayer.disconnect.duplicatelogin",
     "you logged in from another location",
     "logged in from another location",
     "you are already connected",

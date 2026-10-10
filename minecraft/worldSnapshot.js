@@ -1,3 +1,5 @@
+const { resolvePlayerEntity } = require("./playerIdentity");
+
 function roundNumber(value) {
   return Math.round(Number(value) * 10) / 10;
 }
@@ -123,10 +125,11 @@ function summarizePlayerState(bot, focusPlayer) {
     return null;
   }
 
-  const target = bot?.players?.[focusPlayer]?.entity || null;
+  const { name: serverName, entity: target } = resolvePlayerEntity(bot, focusPlayer);
 
   return {
     name: focusPlayer,
+    server_name: serverName,
     visible: Boolean(target),
     distance:
       target && bot?.entity?.position ? roundNumber(distanceBetween(target.position, bot.entity.position)) : null,

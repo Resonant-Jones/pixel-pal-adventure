@@ -3,8 +3,8 @@
 # Read-only check that Bedrock crossplay is actually live.
 #
 # Installing Geyser and Floodgate is not the same as having them working. This
-# answers the question that matters: can a Bedrock client on the iPad reach the
-# world right now, and as which username?
+# checks local prerequisites. Only a real Bedrock login proves that the iPad
+# can reach the world and that runtime authentication accepts it.
 #
 # This script changes nothing and signals nothing. Safe to run at any time,
 # including while the server is up.
@@ -12,17 +12,19 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SERVER_DIR="$ROOT/minecraft-server"
+SERVER_DIR="${MINECRAFT_SERVER_DIR:-$ROOT/minecraft-server}"
 PLUGINS="$SERVER_DIR/plugins"
 MC_PORT="${PAPER_PORT:-25565}"
 BEDROCK_PORT="${BEDROCK_PORT:-19132}"
 
 PASS=0
 FAIL=0
+WARN=0
 
 ok()   { printf '\033[0;32m  ✓\033[0m %s\n' "$1"; PASS=$((PASS + 1)); }
 bad()  { printf '\033[0;31m  ✗\033[0m %s\n' "$1"; FAIL=$((FAIL + 1)); }
 info() { printf '\033[0;36m  ·\033[0m %s\n' "$1"; }
+warn() { printf '\033[0;33m  !\033[0m %s\n' "$1"; WARN=$((WARN + 1)); }
 head_() { printf '\n\033[1m%s\033[0m\n' "$1"; }
 
 echo ""
@@ -75,8 +77,8 @@ if [ -f "$SERVER_DIR/logs/latest.log" ]; then
     bad "no Floodgate startup line in latest.log"
   fi
 
-  if grep -qiE '(ERROR|SEVERE).*(Geyser|Floodgate)' "$SERVER_DIR/logs/latest.log"; then
-    warn_lines="$(grep -iE '(ERROR|SEVERE).*(Geyser|Floodgate)' "$SERVER_DIR/logs/latest.log" | tail -n 3)"
+  if grep -qiE '\[[^]]*/(ERROR|SEVERE)\].*(Geyser|Floodgate)' "$SERVER_DIR/logs/latest.log"; then
+    warn_lines="$(grep -iE '\[[^]]*/(ERROR|SEVERE)\].*(Geyser|Floodgate)' "$SERVER_DIR/logs/latest.log" | tail -n 3)"
     bad "Geyser/Floodgate errors in the log:"
     printf '%s\n' "$warn_lines" | sed 's/^/      /'
   fi
@@ -92,7 +94,7 @@ else
   bad "no key.pem yet — it is generated on the first boot after installation"
 fi
 
-head_ "5. Effective configuration"
+head_ "5. Configuration on disk"
 
 GEYSER_CFG="$PLUGINS/Geyser-Spigot/config.yml"
 if [ -f "$GEYSER_CFG" ]; then
@@ -102,26 +104,16 @@ if [ -f "$GEYSER_CFG" ]; then
   # far less breakable than trying to track the section header.
   RESOLVED="$(grep -E '^[[:space:]]+auth-type:' "$GEYSER_CFG" 2>/dev/null | tail -n 1 | sed -E 's/.*auth-type:[[:space:]]*//' | tr -d '"'"'" | tr -d '\r')"
   if [ "$RESOLVED" = "floodgate" ]; then
-    ok "auth-type is floodgate (Bedrock players need no Java account)"
+    ok "auth-type on disk is floodgate"
   elif [ -z "$RESOLVED" ]; then
     bad "could not find auth-type in the Geyser config"
   else
     bad "auth-type is '$RESOLVED' — should be 'floodgate' for a Bedrock-only player"
   fi
 
-  # Config on disk is not config in memory. Geyser reads these values at boot,
-  # so an edit made after the last server start has not taken effect yet.
-  # latest.log is created when the server starts, so its mtime is a good proxy
-  # for "when did the current instance boot".
-  if [ -f "$SERVER_DIR/logs/latest.log" ]; then
-    CFG_MTIME="$(stat -f %m "$GEYSER_CFG" 2>/dev/null || echo 0)"
-    BOOT_MTIME="$(stat -f %m "$SERVER_DIR/logs/latest.log" 2>/dev/null || echo 0)"
-    if [ "$CFG_MTIME" -gt "$BOOT_MTIME" ]; then
-      bad "config.yml was edited AFTER this server instance booted — restart Paper for it to apply"
-    else
-      ok "config.yml is older than this boot, so these values are live"
-    fi
-  fi
+  # Appending any log line changes latest.log's mtime. Comparing that timestamp
+  # with config.yml cannot establish boot time or the effective auth mode.
+  warn "runtime auth mode is unverified — restart after config edits and prove it with an iPad login"
   BP="$(awk '/^bedrock:/{f=1;next} /^  port:/{if(f){print $2;exit}}' "$GEYSER_CFG" 2>/dev/null)"
   if [ -n "$BP" ]; then
     info "Geyser bedrock.port = $BP"
@@ -139,9 +131,9 @@ if [ -f "$FG_CFG" ]; then
   fi
   info "username-prefix = '$PREFIX'"
   if [ "$PREFIX" = "<empty>" ]; then
-    info "Bedrock names arrive unchanged, matching ops.json and PRIMARY_PLAYER"
+    info "expected Bedrock names arrive unchanged"
   else
-    info "Bedrock players arrive as '${PREFIX}<name>' — player lookup tolerates this"
+    info "expected Bedrock name: '${PREFIX}<name>' — confirm the actual name during login"
   fi
 else
   bad "no Floodgate config.yml"
@@ -180,12 +172,13 @@ fi
 # handful of other utun interfaces macOS keeps around.
 TS_IP="$(ifconfig 2>/dev/null | grep -oE 'inet 100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9.]+' | awk '{print $2}' | head -n 1)"
 if [ -n "$TS_IP" ]; then
-  info "Tailscale address $TS_IP also reaches this server from off-LAN"
+  info "Tailscale address detected: $TS_IP — off-LAN reachability has not been tested"
 fi
 
 echo ""
 echo "══════════════════════════════════════════════════════"
-printf '  %s passed, %s failed\n' "$PASS" "$FAIL"
+printf '  %s local checks passed, %s failed, %s unverified\n' "$PASS" "$FAIL" "$WARN"
+info "an iPad connection and successful login remain the acceptance gate"
 echo "══════════════════════════════════════════════════════"
 echo ""
 

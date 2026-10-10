@@ -1,3 +1,5 @@
+const { matchesPlayerName } = require("../minecraft/playerIdentity");
+
 // agent/firstGreet.js
 //
 // One-shot "hello" the agent delivers when Panda_Nuggetz (or whoever the
@@ -37,14 +39,14 @@ class FirstGreet {
     this.deliveredThisSession = false;
   }
 
-  shouldGreet(payload) {
+  shouldGreet(payload, bot = null) {
     if (this.deliveredThisSession) return false;
-    if (!payload || payload.username !== this.primaryPlayer) return false;
+    if (!payload || !matchesPlayerName(bot, this.primaryPlayer, payload.username)) return false;
     return true;
   }
 
   async deliver(botAdapter, payload) {
-    if (!this.shouldGreet(payload)) return false;
+    if (!this.shouldGreet(payload, botAdapter.bot)) return false;
     this.deliveredThisSession = true;
     const message = pickGreeting(this.primaryPlayer, this.companionName, this.greeting);
     try {

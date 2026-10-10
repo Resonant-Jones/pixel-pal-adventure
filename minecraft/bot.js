@@ -1,4 +1,5 @@
 const { EventEmitter } = require("events");
+const { setTimeout: wait } = require("node:timers/promises");
 
 const minecraftData = require("minecraft-data");
 const ping = require("minecraft-protocol/src/ping");
@@ -10,54 +11,7 @@ const { captureWorldSnapshot } = require("./worldSnapshot");
 
 const { GoalBlock, GoalFollow, GoalNear } = goals;
 
-// Floodgate 2.x prefixes Bedrock usernames with "." by default, so a player
-// configured as "Panda_Nuggetz" actually reaches Paper as ".Panda_Nuggetz".
-// An exact-key lookup returns null for that, and every dependent behaviour —
-// follow, face, tag-the-here, teleport — quietly degrades. So resolution tries
-// the configured name first, then the known Floodgate prefixes.
-//
-// This also has to work when `username-prefix` is set to "" instead, which is
-// why both directions are attempted rather than blindly prepending a dot.
-const FLOODGATE_USERNAME_PREFIXES = [".", "*", "+", "-"];
-
-function playerNameCandidates(username) {
-  if (typeof username !== "string") {
-    return [];
-  }
-
-  const name = username.trim();
-
-  if (!name) {
-    return [];
-  }
-
-  const candidates = [name];
-  const alreadyPrefixed = FLOODGATE_USERNAME_PREFIXES.some(
-    (prefix) => name.startsWith(prefix) && name.length > prefix.length
-  );
-
-  if (alreadyPrefixed) {
-    candidates.push(name.slice(1));
-  } else {
-    for (const prefix of FLOODGATE_USERNAME_PREFIXES) {
-      candidates.push(`${prefix}${name}`);
-    }
-  }
-
-  return candidates;
-}
-
-function resolvePlayerEntity(bot, username) {
-  for (const candidate of playerNameCandidates(username)) {
-    const entity = bot?.players?.[candidate]?.entity;
-
-    if (entity) {
-      return { name: candidate, entity };
-    }
-  }
-
-  return { name: null, entity: null };
-}
+const { FLOODGATE_USERNAME_PREFIXES, playerNameCandidates, resolvePlayerEntity, matchesPlayerName } = require("./playerIdentity");
 
 function normalizeMinecraftVersion(version) {
   if (version === undefined || version === null || version === "") {
@@ -336,19 +290,64 @@ class MinecraftBotAdapter extends EventEmitter {
     this.movements = null;
     this.botOperationQueue = Promise.resolve();
     this.activeBotOperation = null;
+    this.survivalLease = null;
+    this.survivalEpoch = 0;
+  }
+
+  assertTaskMovementAllowed(epoch = this.survivalEpoch, bot = this.bot) {
+    if (bot !== this.bot) {
+      const error = new Error("Task interrupted because its Minecraft connection ended.");
+      error.code = "not_connected";
+      throw error;
+    }
+    if (this.survivalLease || epoch !== this.survivalEpoch) {
+      const error = new Error("Task interrupted for self-preservation.");
+      error.code = "survival_interrupted";
+      throw error;
+    }
+  }
+
+  beginSurvival() {
+    const lease = { bot: this.bot, epoch: ++this.survivalEpoch };
+    this.survivalLease = lease;
+    // Unlike pathfinder.stop(), setGoal(null) clears the goal immediately.
+    // This also rejects an outstanding goto() so its build can checkpoint.
+    try {
+      lease.bot?.pathfinder?.setGoal(null);
+      lease.bot?.stopDigging?.();
+      this.releaseMovementControls(lease.bot);
+    } catch (error) {
+      this.endSurvival(lease);
+      throw error;
+    }
+    return lease;
+  }
+
+  endSurvival(lease) {
+    if (this.survivalLease !== lease) return;
+    this.releaseMovementControls(lease.bot);
+    this.survivalLease = null;
   }
 
   async #runWithTimeout(operationName, operation, timeoutMs) {
+    const epoch = this.survivalEpoch;
+    const bot = this.bot;
+    this.assertTaskMovementAllowed(epoch, bot);
     let timeoutId = null;
     const timeoutPromise = new Promise((_, reject) => {
       timeoutId = setTimeout(() => {
-        this.stopPathing();
+        if (epoch === this.survivalEpoch && bot === this.bot) this.stopPathing();
         reject(createOperationTimeoutError(operationName, timeoutMs));
       }, timeoutMs);
     });
 
     try {
-      return await Promise.race([Promise.resolve().then(operation), timeoutPromise]);
+      const result = await Promise.race([Promise.resolve().then(() => {
+        this.assertTaskMovementAllowed(epoch, bot);
+        return operation();
+      }), timeoutPromise]);
+      this.assertTaskMovementAllowed(epoch, bot);
+      return result;
     } finally {
       if (timeoutId) {
         clearTimeout(timeoutId);
@@ -433,13 +432,13 @@ class MinecraftBotAdapter extends EventEmitter {
         username,
         message,
         timestamp: new Date().toISOString(),
-        isPrimaryPlayer: username === this.config.primaryPlayer,
+        isPrimaryPlayer: matchesPlayerName(bot, this.config.primaryPlayer, username),
         directMention: new RegExp(`\\b${escapeRegex(this.config.username)}\\b`, "i").test(message)
       });
     });
 
     bot.on("entityMoved", (entity) => {
-      if (entity?.username === this.config.primaryPlayer) {
+      if (matchesPlayerName(bot, this.config.primaryPlayer, entity?.username)) {
         this.emit("entityMoved", {
           username: entity.username,
           timestamp: new Date().toISOString(),
@@ -495,6 +494,7 @@ class MinecraftBotAdapter extends EventEmitter {
     });
 
     bot.on("error", (error) => {
+      if (this.bot && this.bot !== bot) return;
       this.logger.error("[minecraft] Bot error:", error);
       this.lastDisconnectReason = error?.message || String(error);
       this.emit("botError", error);
@@ -506,6 +506,7 @@ class MinecraftBotAdapter extends EventEmitter {
     });
 
     bot.on("kicked", (reason) => {
+      if (this.bot && this.bot !== bot) return;
       const message = typeof reason === "string" ? reason : JSON.stringify(reason);
       const error = new Error(`Minecraft connection was kicked: ${message}`);
       this.logger.error("[minecraft] Bot kicked:", message);
@@ -519,6 +520,7 @@ class MinecraftBotAdapter extends EventEmitter {
     });
 
     bot.on("end", () => {
+      if (this.bot && this.bot !== bot) return;
       this.bot = null;
       this.movements = null;
 
@@ -589,25 +591,29 @@ class MinecraftBotAdapter extends EventEmitter {
   }
 
   async stopFollowing() {
+    if (this.survivalLease) return;
     if (!this.bot) {
       throw new Error("Bot is not connected.");
     }
 
+    const perform = async () => {
+      // stop() waits for a path node. An explicit player stop must cancel the
+      // dynamic goal now, even if the player moves before the next tick.
+      this.bot.pathfinder.setGoal(null);
+      this.releaseMovementControls();
+    };
+
     if (this.activeBotOperation) {
       return this.#runWithTimeout(
         "stop_following",
-        async () => {
-          this.stopPathing();
-        },
+        perform,
         5000
       );
     }
 
     return this.#withBotOperation(
       "stop_following",
-      async () => {
-        this.stopPathing();
-      },
+      perform,
       5000
     );
   }
@@ -618,6 +624,9 @@ class MinecraftBotAdapter extends EventEmitter {
     }
 
     const perform = async () => {
+      const epoch = this.survivalEpoch;
+      const bot = this.bot;
+      this.assertTaskMovementAllowed(epoch, bot);
       const target = normalizeBlockPosition(position);
 
       if (!target) {
@@ -634,6 +643,7 @@ class MinecraftBotAdapter extends EventEmitter {
           position: target
         };
       } catch (error) {
+        this.assertTaskMovementAllowed(epoch, bot);
         this.stopPathing();
         return {
           status: "blocked",
@@ -656,6 +666,9 @@ class MinecraftBotAdapter extends EventEmitter {
     }
 
     const perform = async () => {
+      const epoch = this.survivalEpoch;
+      const bot = this.bot;
+      this.assertTaskMovementAllowed(epoch, bot);
       const target = normalizeBlockPosition(position);
       if (!target) {
         throw new Error("Invalid coordinates.");
@@ -671,6 +684,7 @@ class MinecraftBotAdapter extends EventEmitter {
           position: target
         };
       } catch (error) {
+        this.assertTaskMovementAllowed(epoch, bot);
         this.stopPathing();
         return {
           status: "blocked",
@@ -710,6 +724,7 @@ class MinecraftBotAdapter extends EventEmitter {
   }
 
   stopPathing() {
+    if (this.survivalLease) return;
     if (typeof this.bot?.pathfinder?.stop === "function") {
       this.bot.pathfinder.stop();
       return;
@@ -864,6 +879,9 @@ class MinecraftBotAdapter extends EventEmitter {
     }
 
     const perform = async () => {
+      const epoch = this.survivalEpoch;
+      const bot = this.bot;
+      this.assertTaskMovementAllowed(epoch, bot);
       const target = normalizeBlockPosition(position);
       const targetVec = toVec3(this.bot, target);
       const block = targetVec ? this.bot.blockAt(targetVec) : null;
@@ -889,6 +907,7 @@ class MinecraftBotAdapter extends EventEmitter {
       try {
         approach = await this.goNear(target, 3);
       } catch (error) {
+        this.assertTaskMovementAllowed(epoch, bot);
         approach = {
           status: "blocked",
           position: target,
@@ -896,6 +915,7 @@ class MinecraftBotAdapter extends EventEmitter {
         };
       }
 
+      this.assertTaskMovementAllowed(epoch, bot);
       if (approach?.status === "blocked") {
         return approach;
       }
@@ -903,6 +923,7 @@ class MinecraftBotAdapter extends EventEmitter {
       try {
         await this.bot.dig(block);
       } catch (error) {
+        this.assertTaskMovementAllowed(epoch, bot);
         return {
           status: "blocked",
           position: target,
@@ -952,6 +973,9 @@ class MinecraftBotAdapter extends EventEmitter {
 
   async clearBlockForPlacement(position) {
     const perform = async () => {
+      const epoch = this.survivalEpoch;
+      const bot = this.bot;
+      this.assertTaskMovementAllowed(epoch, bot);
       const targetVec = toVec3(this.bot, position);
       const block = targetVec ? this.bot.blockAt(targetVec) : null;
 
@@ -968,12 +992,14 @@ class MinecraftBotAdapter extends EventEmitter {
       try {
         approach = await this.goNear(position, 3);
       } catch (error) {
+        this.assertTaskMovementAllowed(epoch, bot);
         approach = {
           status: "blocked",
           message: error.message || "I couldn't reach that spot right now."
         };
       }
 
+      this.assertTaskMovementAllowed(epoch, bot);
       if (approach?.status === "blocked") {
         return false;
       }
@@ -981,6 +1007,7 @@ class MinecraftBotAdapter extends EventEmitter {
       try {
         await this.bot.dig(block);
       } catch (error) {
+        this.assertTaskMovementAllowed(epoch, bot);
         return false;
       }
 
@@ -1000,6 +1027,9 @@ class MinecraftBotAdapter extends EventEmitter {
     }
 
     const perform = async () => {
+      const epoch = this.survivalEpoch;
+      const bot = this.bot;
+      this.assertTaskMovementAllowed(epoch, bot);
       const target = normalizeBlockPosition(position);
       const targetVec = toVec3(this.bot, target);
       const item = this.findInventoryItem(blockName);
@@ -1029,6 +1059,7 @@ class MinecraftBotAdapter extends EventEmitter {
         try {
           cleared = await this.clearBlockForPlacement(target);
         } catch (error) {
+        this.assertTaskMovementAllowed(epoch, bot);
           cleared = false;
         }
 
@@ -1055,6 +1086,7 @@ class MinecraftBotAdapter extends EventEmitter {
       try {
         approach = await this.goNear(target, 4);
       } catch (error) {
+        this.assertTaskMovementAllowed(epoch, bot);
         approach = {
           status: "blocked",
           position: target,
@@ -1062,6 +1094,7 @@ class MinecraftBotAdapter extends EventEmitter {
         };
       }
 
+      this.assertTaskMovementAllowed(epoch, bot);
       if (approach?.status === "blocked") {
         return approach;
       }
@@ -1069,6 +1102,7 @@ class MinecraftBotAdapter extends EventEmitter {
       try {
         await this.bot.equip(item, "hand");
       } catch (error) {
+        this.assertTaskMovementAllowed(epoch, bot);
         return {
           status: "blocked",
           position: target,
@@ -1077,8 +1111,10 @@ class MinecraftBotAdapter extends EventEmitter {
       }
 
       try {
+        this.assertTaskMovementAllowed(epoch, bot);
         await this.bot.placeBlock(reference.block, reference.faceVector);
       } catch (error) {
+        this.assertTaskMovementAllowed(epoch, bot);
         const afterAttempt = this.bot.blockAt(targetVec);
         if (afterAttempt?.name === blockName) {
           return {
@@ -1370,7 +1406,7 @@ class MinecraftBotAdapter extends EventEmitter {
 
     const pos = bot.entity.position;
     return {
-      isAlive: true,
+      isAlive: bot.health !== 0,
       health: typeof bot.health === "number" ? bot.health : null,
       food: typeof bot.food === "number" ? bot.food : null,
       position: pos ? { x: pos.x, y: pos.y, z: pos.z } : null,
@@ -1380,7 +1416,7 @@ class MinecraftBotAdapter extends EventEmitter {
 
   // Nearest hostile mob within range, or null. Ignores anything with a
   // different mob name than the known hostile set.
-  findNearestHostile(range = 12) {
+  findNearestHostile(range = 12, { fleeOnly = false } = {}) {
     const bot = this.bot;
     if (!bot?.entity?.position) {
       return null;
@@ -1399,6 +1435,7 @@ class MinecraftBotAdapter extends EventEmitter {
       if (!HOSTILE_MOBS.has(name)) {
         continue;
       }
+      if (fleeOnly && !["creeper", "ghast", "blaze", "witch", "ravager"].includes(name)) continue;
 
       const distance = origin.distanceTo(entity.position);
       if (distance <= range && distance < bestDistance) {
@@ -1484,110 +1521,107 @@ class MinecraftBotAdapter extends EventEmitter {
 
   // Swing at a specific entity until it dies, leaves range, or we run out of
   // time. Returns a small report so the caller does not have to guess.
-  async attackEntity(entity, { maxDurationMs = 6000, range = 3.5 } = {}) {
+  async attackEntity(entity, { maxDurationMs = 6000, range = 3.5, signal } = {}) {
     const bot = this.bot;
     if (!bot?.entity || !entity) {
       return { attacked: false, killed: false, reason: "not_connected" };
     }
-
-    await this.equipBestWeapon();
-
-    const deadline = Date.now() + maxDurationMs;
     let swings = 0;
-
-    while (Date.now() < deadline) {
-      const target = bot.entities?.[entity.id];
-      if (!target || !target.isValid) {
-        return { attacked: swings > 0, killed: true, swings, reason: "target_gone" };
-      }
-
-      const distance = bot.entity.position.distanceTo(target.position);
-      if (distance > 24) {
-        return { attacked: swings > 0, killed: false, swings, reason: "target_escaped" };
-      }
-
-      try {
-        if (distance > range) {
-          // Step into range without the pathfinder, which would override the
-          // child's follow goal and strand us mid-fight.
-          await bot.lookAt(target.position.offset(0, target.height ? target.height * 0.8 : 1, 0), true);
-          bot.setControlState("forward", true);
-          await new Promise((resolve) => setTimeout(resolve, 120));
-          bot.setControlState("forward", false);
-          continue;
+    const interrupted = () => signal?.aborted || this.bot !== bot || bot.health === 0;
+    const cancelled = () => ({ attacked: swings > 0, killed: false, swings, interrupted: true, reason: "interrupted" });
+    try {
+      if (interrupted()) return cancelled();
+      await this.equipBestWeapon();
+      const deadline = Date.now() + maxDurationMs;
+      while (Date.now() < deadline) {
+        if (interrupted()) return cancelled();
+        const target = bot.entities?.[entity.id];
+        if (!target || !target.isValid) {
+          return { attacked: swings > 0, killed: false, swings, reason: "target_gone" };
         }
-
+        const distance = bot.entity.position.distanceTo(target.position);
+        if (distance > 24) {
+          return { attacked: swings > 0, killed: false, swings, reason: "target_escaped" };
+        }
         await bot.lookAt(target.position.offset(0, target.height ? target.height * 0.8 : 1, 0), true);
-        bot.attack(target);
-        swings += 1;
-
-        // Match the vanilla attack cooldown so swings actually deal damage.
-        await new Promise((resolve) => setTimeout(resolve, 625));
-      } catch (error) {
-        return { attacked: swings > 0, killed: false, swings, reason: error.message };
+        if (interrupted()) return cancelled();
+        if (distance > range) {
+          bot.setControlState("forward", true);
+          await wait(120, undefined, { signal });
+          bot.setControlState("forward", false);
+        } else {
+          bot.attack(target);
+          swings += 1;
+          await wait(625, undefined, { signal });
+        }
       }
+      return { attacked: swings > 0, killed: false, swings, reason: "timeout" };
+    } catch (error) {
+      return interrupted() ? cancelled() : { attacked: swings > 0, killed: false, swings, reason: error.message };
+    } finally {
+      this.releaseMovementControls(bot);
     }
-
-    return { attacked: swings > 0, killed: false, swings, reason: "timeout" };
   }
 
   // Sprint directly away from a threat. Cheaper and more reliable than pathing
   // when the only goal is "not here".
-  async fleeFrom(position, { durationMs = 2500 } = {}) {
+  async fleeFrom(position, { durationMs = 2500, signal } = {}) {
     const bot = this.bot;
     if (!bot?.entity?.position || !position) {
       return { fled: false, reason: "not_connected" };
     }
-
+    const interrupted = () => signal?.aborted || this.bot !== bot || bot.health === 0;
     const origin = bot.entity.position;
-
     try {
-      // Face away and hold sprint-jump. Jumping clears one-block steps, which
-      // is what usually kills an escape attempt in rough terrain.
-      const away = {
-        x: origin.x + (origin.x - position.x),
-        y: origin.y,
-        z: origin.z + (origin.z - position.z)
-      };
-
-      await bot.lookAt(new Vec3(away.x, away.y + 1, away.z), true);
+      if (interrupted()) return { fled: false, interrupted: true };
+      const away = new Vec3(origin.x + (origin.x - position.x), origin.y + 1, origin.z + (origin.z - position.z));
+      await bot.lookAt(away, true);
+      if (interrupted()) return { fled: false, interrupted: true };
       bot.setControlState("sprint", true);
       bot.setControlState("forward", true);
-
       const deadline = Date.now() + durationMs;
-      while (Date.now() < deadline) {
+      while (Date.now() < deadline && !interrupted()) {
         bot.setControlState("jump", true);
-        await new Promise((resolve) => setTimeout(resolve, 200));
+        await wait(200, undefined, { signal });
+        if (interrupted()) break;
         bot.setControlState("jump", false);
-        await new Promise((resolve) => setTimeout(resolve, 200));
+        await wait(200, undefined, { signal });
       }
-
-      return { fled: true };
+      return { fled: !interrupted(), interrupted: Boolean(interrupted()) };
     } catch (error) {
-      return { fled: false, reason: error?.message || String(error) };
+      return { fled: false, interrupted: Boolean(interrupted()), reason: error?.message || String(error) };
     } finally {
-      this.releaseMovementControls();
+      this.releaseMovementControls(bot);
     }
   }
 
   // Eat whatever is edible. Vanilla only lets you eat below a food threshold,
   // so a failure here usually just means "not hungry enough".
-  async consumeFood() {
+  async consumeFood({ signal } = {}) {
     const bot = this.bot;
-    if (!bot?.entity) {
-      return { ate: false, reason: "not_connected" };
-    }
-
+    if (!bot?.entity) return { ate: false, reason: "not_connected" };
+    const interrupted = () => signal?.aborted || this.bot !== bot || bot.health === 0;
+    if (interrupted()) return { ate: false, interrupted: true };
     const item = await this.equipBestFood();
-    if (!item) {
-      return { ate: false, reason: "no_food" };
-    }
-
+    if (!item) return { ate: false, reason: "no_food" };
+    if (interrupted()) return { ate: false, interrupted: true };
+    let onAbort;
     try {
-      await bot.consume();
-      return { ate: true, item };
+      const cancelled = new Promise((resolve) => {
+        onAbort = () => {
+          try { bot.deactivateItem?.(); } catch (_) { /* disconnected */ }
+          resolve({ ate: false, interrupted: true });
+        };
+        signal?.addEventListener("abort", onAbort, { once: true });
+      });
+      return await Promise.race([
+        Promise.resolve(bot.consume()).then(() => ({ ate: true, item })),
+        cancelled
+      ]);
     } catch (error) {
       return { ate: false, reason: error?.message || String(error), item };
+    } finally {
+      signal?.removeEventListener("abort", onAbort);
     }
   }
 
@@ -1623,8 +1657,7 @@ class MinecraftBotAdapter extends EventEmitter {
 
   // Emergency brake. Used when a survival reaction has to take the controls
   // away from whatever task currently holds them.
-  releaseMovementControls() {
-    const bot = this.bot;
+  releaseMovementControls(bot = this.bot) {
     if (!bot) {
       return;
     }

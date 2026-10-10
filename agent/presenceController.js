@@ -1,3 +1,5 @@
+const { resolvePlayerEntity } = require("../minecraft/playerIdentity");
+
 // The "shadow" seam.
 //
 // Before this existed, follow behaviour was reachable only when the model
@@ -39,6 +41,7 @@ class PresenceController {
     // task finished and we have not re-engaged yet.
     this.mode = "idle";
     this.holding = false;
+    this.explicitHold = false;
     this.following = false;
     this.lastReengageAt = 0;
     this.timer = null;
@@ -74,19 +77,21 @@ class PresenceController {
   // Called when a task ends for any reason: success, pause, or failure. This
   // is the fix for the reported "bot stands staring at nothing" behaviour.
   endTask() {
-    this.holding = false;
-    this.mode = "auto";
+    this.holding = this.explicitHold;
+    this.mode = this.explicitHold ? "hold" : "auto";
     this.lastReengageAt = Date.now();
     this.following = false;
     this.safeStopFollowing();
   }
 
   hold() {
+    this.explicitHold = true;
     this.holding = true;
     this.mode = "hold";
   }
 
   resume() {
+    this.explicitHold = false;
     this.holding = false;
     this.mode = "auto";
     this.lastReengageAt = Date.now();
@@ -97,8 +102,7 @@ class PresenceController {
       return null;
     }
 
-    const target = this.botAdapter.bot.players?.[this.primaryPlayer];
-    return target?.entity || null;
+    return resolvePlayerEntity(this.botAdapter.bot, this.primaryPlayer).entity;
   }
 
   distanceToPlayer() {
@@ -133,6 +137,7 @@ class PresenceController {
   }
 
   safeStopFollowing() {
+    if (this.botAdapter?.survivalLease) return;
     try {
       if (typeof this.botAdapter?.stopFollowing === "function") {
         this.botAdapter.stopFollowing();
@@ -145,7 +150,7 @@ class PresenceController {
   }
 
   async tick() {
-    if (this.holding || !this.isConnected()) {
+    if (this.holding || this.botAdapter?.survivalLease || !this.isConnected()) {
       return false;
     }
 

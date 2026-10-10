@@ -209,6 +209,7 @@ async function main() {
       }
       return !(state.buildStatus?.state === "running" || state.buildStatus?.state === "paused");
     },
+    getPresenceController: () => runtime?.presenceController || null,
     primaryPlayer: runtimeConfig.primaryPlayer,
     companionName: runtimeConfig.companionName,
     allowAutoGiveBuildMaterials: runtimeConfig.allowAutoGiveBuildMaterials,

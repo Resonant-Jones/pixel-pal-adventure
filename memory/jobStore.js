@@ -230,7 +230,7 @@ class JobStore {
     }
 
     const [updated] = await this.client.query(
-      "UPDATE jobs SET status = 'paused', resume_at = $updatedAt, updated_at = $updatedAt WHERE world_id = $worldId AND status = 'running' RETURN AFTER;",
+      'UPDATE jobs SET status = "paused", resume_at = $updatedAt, updated_at = $updatedAt WHERE world_id = $worldId AND status = "running" RETURN AFTER;',
       {
         worldId,
         updatedAt

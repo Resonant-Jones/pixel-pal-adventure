@@ -32,7 +32,7 @@ function makeExecutor({ playerPosition = { x: 100, y: 65, z: -200 } } = {}) {
       return { id: anchor.id, label: anchor.label, payload: anchor.payload };
     },
     async listAnchors() {
-      return anchors.map((a) => ({ id: a.id, label: a.label, type: a.type, payload: a.payload }));
+      return anchors.map((a) => ({ id: a.id, worldId: a.worldId, label: a.label, type: a.type, payload: a.payload }));
     }
   };
 
@@ -218,6 +218,28 @@ async function testTagWithoutStoreIsRefused() {
   console.log("  ✓ a missing store fails loudly");
 }
 
+async function testScopedRecall() {
+  const { executor, anchors, teleports, botAdapter } = makeExecutor();
+  for (const [worldId, taggedBy, threadId] of [
+    ["another-world", "Panda_Nuggetz", "t"],
+    ["world:test", "OtherPlayer", "t"],
+    ["world:test", "Panda_Nuggetz", "another-thread"],
+    ["world:test", undefined, undefined]
+  ]) anchors.push({ worldId, label: "diamond cave", type: "point", payload: { taggedBy, threadId, position: { x: 999, y: 65, z: 999 } } });
+  const absent = await executor.execute({ action: { type: "goto_location", label: "diamond cave" } });
+  assert.strictEqual(absent.anchor.found, false);
+  assert.strictEqual(teleports.length, 0);
+  // Old tags owned by this player remain readable without fabricating a new
+  // owner or requiring a destructive data migration.
+  anchors.push({ worldId: "world:test", label: "diamond cave", type: "point", payload: { taggedBy: ".Panda_Nuggetz", dimension: "overworld", position: { x: 10, y: 65, z: 20 } } });
+  await executor.execute({ action: { type: "goto_location", label: "diamond cave" } });
+  assert.deepStrictEqual(teleports[0].position, { x: 10, y: 65, z: 20 });
+  botAdapter.bot.game.dimension = "the_nether";
+  await assert.rejects(executor.execute({ action: { type: "goto_location", label: "diamond cave" } }), /another dimension/);
+  assert.strictEqual(teleports.length, 1);
+  console.log("  ✓ recall respects player, thread, world and dimension ownership");
+}
+
 (async () => {
   console.log("locationTagging tests");
 
@@ -229,6 +251,7 @@ async function testTagWithoutStoreIsRefused() {
   await testUnknownLocationIsRefused();
   await testTagWithoutPlayerIsRefused();
   await testTagWithoutStoreIsRefused();
+  await testScopedRecall();
 
   console.log("locationTagging tests passed");
 })().catch((error) => {

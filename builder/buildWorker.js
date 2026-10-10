@@ -74,7 +74,7 @@ class BuildWorker {
   }
 
   async runOnce() {
-    if (this.running) {
+    if (this.running || this.botAdapter?.survivalLease) {
       return false;
     }
 
@@ -127,6 +127,8 @@ class BuildWorker {
   }
 
   async handleRetryableFailure(job, context, error, classification) {
+    const diagnosticCode = error.code === "survival_interrupted" ? "SURVIVAL_INTERRUPTED" : "CONNECTION_LOST";
+    const reason = error.code === "survival_interrupted" ? "self-preservation" : "connection loss";
     const resumeAt = toIso(Date.now() + RETRYABLE_DELAY_MS);
 
     try {
@@ -134,7 +136,7 @@ class BuildWorker {
         job.id,
         {
           message: error.message,
-          diagnostic_code: "CONNECTION_LOST",
+          diagnostic_code: diagnosticCode,
           error_code: classification?.errorCode || null,
           error_category: classification?.errorCategory || null
         },
@@ -148,7 +150,7 @@ class BuildWorker {
               job.payload?.consecutive_no_progress_pauses || 0
             ),
             last_failure: {
-              diagnostic_code: "CONNECTION_LOST",
+              diagnostic_code: diagnosticCode,
               message: error.message,
               error_code: classification?.errorCode || null
             }
@@ -156,14 +158,14 @@ class BuildWorker {
         }
       );
     } catch (pauseError) {
-      this.logger.error("[build] Could not pause job after connection loss:", pauseError);
+      this.logger.error(`[build] Could not pause job after ${reason}:`, pauseError);
     }
 
     await this.safeRecordEvent(context, "build_paused", {
-      description: `Build paused after connection loss: ${error.message}`,
+      description: `Build paused after ${reason}: ${error.message}`,
       metadata: {
         jobId: String(job.id),
-        diagnostic_code: "CONNECTION_LOST",
+        diagnostic_code: diagnosticCode,
         error_code: classification?.errorCode || null,
         current_index: Number(job.payload?.current_index || 0),
         resume_at: resumeAt

@@ -66,10 +66,37 @@ async function testDisconnectUsesEnd() {
   assert.strictEqual(adapter.bot, null);
 }
 
+async function testExplicitStopCancelsDynamicFollowingImmediately() {
+  const adapter = new MinecraftBotAdapter({ username: "Guardian" });
+  let goal = { player: "Sage" };
+  const controls = { forward: true, sprint: true };
+  let deferredStop = false;
+  adapter.bot = {
+    pathfinder: {
+      stop() { deferredStop = true; },
+      setGoal(next) { goal = next; }
+    },
+    setControlState(control, value) { controls[control] = value; }
+  };
+
+  await adapter.stopFollowing();
+  // A moving target must not produce another path on the next physics tick.
+  assert.strictEqual(goal, null);
+  assert.strictEqual(deferredStop, false);
+  assert.ok(Object.values(controls).every((value) => value === false));
+
+  const lease = adapter.beginSurvival();
+  controls.forward = true;
+  await adapter.stopFollowing();
+  assert.strictEqual(controls.forward, true, "explicit stop leaves emergency movement with survival");
+  adapter.endSurvival(lease);
+}
+
 Promise.resolve()
   .then(testConfiguredVersionResolvesWhenSupported)
   .then(testUnsupportedServerVersionThrowsHelpfulError)
   .then(testDisconnectUsesEnd)
+  .then(testExplicitStopCancelsDynamicFollowingImmediately)
   .then(() => {
     console.log("minecraftBotAdapter tests passed");
   })

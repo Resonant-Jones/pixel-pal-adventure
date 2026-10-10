@@ -18,6 +18,7 @@ const RETRYABLE_ERROR_CATEGORIES = new Set([
 ]);
 
 const RETRYABLE_ERROR_CODES = new Set([
+  "survival_interrupted",
   "not_connected",
   "connection_ended",
   "kicked",
@@ -77,6 +78,9 @@ function isRetryableBuildError(error) {
 }
 
 function describeBuildError(error) {
+  if (error?.code === "survival_interrupted") {
+    return { errorCode: error.code, errorCategory: "survival", operationSubtype: "self_preservation" };
+  }
   const actionClassification = classifyActionError(error);
   const connectionClassification = classifyConnectionError(error);
 

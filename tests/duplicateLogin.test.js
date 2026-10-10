@@ -18,7 +18,9 @@ const duplicateMessages = [
   "Minecraft connection was kicked: {\"text\":\"You logged in from another location\"}",
   "you are already connected",
   "Already logged in!",
-  "duplicate login detected"
+  "duplicate login detected",
+  'Minecraft connection was kicked: {"translate":"multiplayer.disconnect.duplicateLogin"}',
+  'Minecraft connection was kicked: {"type":"compound","value":{"translate":{"type":"string","value":"multiplayer.disconnect.duplicate_login"}}}'
 ];
 
 for (const message of duplicateMessages) {
