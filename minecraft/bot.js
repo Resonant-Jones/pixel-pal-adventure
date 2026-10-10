@@ -302,6 +302,7 @@ class MinecraftBotAdapter extends EventEmitter {
     this.logger = logger;
     this.bot = null;
     this.movements = null;
+    this.followMovements = null;
     this.botOperationQueue = Promise.resolve();
     this.activeBotOperation = null;
     this.survivalLease = null;
@@ -633,6 +634,7 @@ async applyStartupGamerules(bot) {
       if (this.bot && this.bot !== bot) return;
       this.bot = null;
       this.movements = null;
+      this.followMovements = null;
 
       // `end` fires immediately after every `kicked`, carrying no reason of its
       // own. Hand the last known reason along, otherwise the consumer sees a
@@ -676,6 +678,70 @@ async applyStartupGamerules(bot) {
     return resolvePlayerEntity(this.bot, username).name;
   }
 
+  /**
+   * Follow has to look like a player walking, not a bulldozer tunnelling.
+   *
+   * The mineflayer-pathfinder defaults are `canDig = true` and
+   * `allow1by1towers = true`. Both being on means that when Sage is standing
+   * above Guardian on a ridge, the pathfinder will happily plan a route
+   * straight *up through* the blocks instead of walking around and hopping a
+   * step. At roughly a second per block that reads to a child as "Guardian
+   * can't jump" — which is exactly what Sage reported while Guardian sat at
+   * y66 announcing that it was following him up to y71.
+   *
+   * This tuning is follow-only. The other setMovements call sites still use the
+   * default Movements, because actually building a wall in front of you
+   * legitimately needs to place or dig through blocks.
+   */
+  #followMovements() {
+    if (!this.followMovements) {
+      this.followMovements = new Movements(this.bot);
+      this.followMovements.canDig = false;
+      this.followMovements.allow1by1towers = false;
+      this.followMovements.allowParkour = true;
+      this.followMovements.allowSprinting = true;
+      this.followMovements.allowFreeMotion = false;
+      this.followMovements.maxDropDown = 4;
+    }
+    return this.followMovements;
+  }
+
+  /**
+   * Follow failures used to be completely silent.
+   *
+   * When the pathfinder cannot find a straight-line, sprint-jump or walk-jump
+   * route, it sets `forward = false` and stands still. Guardian would then keep
+   * claiming to follow while Sage watched it not move. Log the vertical gap it
+   * is trying to close, then check whether it actually closed it.
+   */
+  #logFollowAttempt(username, entity) {
+    const bot = this.bot;
+    const from = bot.entity.position;
+    const to = entity.position;
+    const dy = Math.round(to.y - from.y);
+    const distance = Math.round(Math.hypot(to.x - from.x, to.z - from.z));
+
+    this.logger.info(
+      `[minecraft] follow ${username}: dy=${dy} dist=${distance} ` +
+        `from=${Math.round(from.x)},${Math.round(from.y)},${Math.round(from.z)} ` +
+        `to=${Math.round(to.x)},${Math.round(to.y)},${Math.round(to.z)}`
+    );
+
+    setTimeout(() => {
+      // The bot may have reconnected or quit while this probe was pending.
+      if (this.bot !== bot || !bot.entity) return;
+
+      const now = bot.entity.position;
+      const moved = Math.hypot(now.x - from.x, now.y - from.y, now.z - from.z);
+      const climb = Math.round(now.y - from.y);
+      this.logger.info(
+        `[minecraft] follow probe: moved=${moved.toFixed(2)} climb=${climb} ` +
+          `forward=${Boolean(bot.controlState?.forward)} ` +
+          `jump=${Boolean(bot.controlState?.jump)}`
+      );
+    }, 5000).unref?.();
+  }
+
   async followPlayer(username = this.config.primaryPlayer) {
     if (!this.bot) {
       throw new Error("Bot is not connected.");
@@ -689,8 +755,12 @@ async applyStartupGamerules(bot) {
       }
 
       this.stopPathing();
-      this.bot.pathfinder.setMovements(this.movements || new Movements(this.bot));
-      this.bot.pathfinder.setGoal(new GoalFollow(entity, this.config.followDistance || 2), true);
+      this.bot.pathfinder.setMovements(this.#followMovements());
+      this.#logFollowAttempt(username, entity);
+      this.bot.pathfinder.setGoal(
+        new GoalFollow(entity, this.config.followDistance || 2),
+        true
+      );
     };
 
     if (this.activeBotOperation) {
