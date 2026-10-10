@@ -176,6 +176,52 @@ real `handleConnectionLoss` through the real kicked→halt→end sequence.
 > Keep both guards: `duplicateSessionHalted` in the runtime, and the
 > `CONTROL_PORT` check in `startStack.js`.
 
+### 2.6g Floodgate UUIDs cannot be computed — read usercache.json
+
+**This one cost a full session.** An op entry for a Bedrock player must use the
+UUID Floodgate issued, which is:
+
+```
+00000000-0000-0000-0009-<xuid>        ← Bedrock, via Floodgate
+```
+
+**not** the offline-mode MD5 UUID (`OfflinePlayer:<name>`), which is what you get
+for a Java account. Computing a Floodgate UUID is impossible from the username
+alone.
+
+The failure mode is nasty because everything *looks* right. The op entry has the
+correct username, a valid UUID, and a plausible level. Paper keys operators by
+**UUID**, so the username match does nothing. The player stays "a Member", can
+run no commands, and the file gives no hint why.
+
+The authoritative source is **`minecraft-server/usercache.json`**, which the
+server maintains itself and which contains the real UUID for every account that
+has ever joined — Java and Bedrock alike:
+
+```
+.PandaNuggetz120     00000000-0000-0000-0009-01f3ac1e1299
+Guardian             1e885736-6516-33bc-8cdc-09987f03d5f7
+```
+
+`startPaperServer.js` reads that file. It falls back to computing an offline UUID
+only for the Java bot, and warns loudly for any name with no recorded UUID —
+because a Bedrock account's UUID does not exist until it has joined at least once.
+
+**Ops are read at boot.** Editing `ops.json` does nothing until Paper restarts.
+The `/op` command cannot help either: it requires an operator to already exist,
+and the server console is not reachable from the agent sandbox.
+
+### 2.6h A dead op entry can look perfectly healthy
+
+`ops.json` held one entry, `Panda_Nuggetz`, with the *correct UUID for that
+name*. The name matched no existing account. The file looked populated and
+correct, which is why it survived unnoticed while the child it was meant for
+could not run a single command.
+
+Nothing ever wrote it — it was hand-created once and rotted. That is why
+`startPaperServer.js` now derives operators from `COMPANION_PLAYERS`, and why the
+MOTD no longer hardcodes a name.
+
 ### 2.6b The primary player name was simply wrong
 
 `.env` had `PRIMARY_PLAYER=Panda_Nuggetz`. That is not an account on this
