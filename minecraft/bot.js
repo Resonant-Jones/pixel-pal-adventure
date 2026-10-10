@@ -484,6 +484,56 @@ async applyStartupGamerules(bot) {
         );
       }
     }
+
+    await this.provideStarterKit();
+  }
+
+  // A small palette of common building blocks.
+  //
+  // The auto-give path in provisionBuildMaterials() only kicks in once a build
+  // has already failed on MISSING_MATERIALS, so the very first request still
+  // stalls on an empty inventory. Seeding a starter palette means the first
+  // build Guardian is ever asked for can actually place blocks, and it also
+  // gives it something sensible to build with when improvising.
+  //
+  // Creative mode is required for /give to work, which is why this runs after
+  // the gamemode change above. One stack each: enough to demonstrate a build
+  // without filling the inventory with a material pallet.
+  async provideStarterKit() {
+    const blocks = [
+      "oak_planks",
+      "cobblestone",
+      "glass",
+      "oak_log",
+      "stone_bricks",
+      "white_wool",
+      "torch",
+      "oak_stairs"
+    ];
+
+    if (!this.isCreativeMode()) {
+      return null;
+    }
+
+    const given = [];
+
+    for (const block of blocks) {
+      try {
+        await this.runCommand(`/give @s minecraft:${block} 32`);
+        given.push(block);
+      } catch (error) {
+        this.logger.warn?.(
+          `[minecraft] starter kit: could not give ${block}:`,
+          error?.message || error
+        );
+      }
+    }
+
+    if (given.length) {
+      this.logger.info?.(`[minecraft] starter kit: ${given.join(", ")}`);
+    }
+
+    return given;
   }
 
   #wireLifecycle(bot, reject, isSettled, markSettled) {

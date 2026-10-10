@@ -50,6 +50,49 @@ function normalizeCommandText(text, companionName) {
   return collapsed.replace(new RegExp(`^${escapeRegex(companionName.toLowerCase())}[,:\\s-]*`), "").trim();
 }
 
+// What to actually say to the player when a turn fails.
+//
+// This used to be one fixed sentence for every possible cause: "I lost the
+// thread for a moment. Ask me again in a second." That is worse than no reply.
+// It implies the problem is temporary and that repeating the request will help,
+// and a child reasonably believes it — so he asks again, fails again, and
+// concludes the companion is broken rather than that the build did not work.
+//
+// So name the actual cause, in plain language, and say whether trying again is
+// worth anything. Build failures get specific, actionable wording because those
+// are the ones a child will actually trigger.
+function describeTurnFailure(error, companionName = "I") {
+  const message = String(error?.message || error || "").toLowerCase();
+
+  const isBuildFailure =
+    message.includes("compose_structure") ||
+    message.includes("build_structure") ||
+    message.includes("missing materials") ||
+    message.includes("no_progress") ||
+    message.includes("site_obstructed") ||
+    message.includes("build bounds") ||
+    message.includes("target location");
+
+  if (isBuildFailure) {
+    if (message.includes("missing materials")) {
+      return `I couldn't start that build — I'm out of blocks to use. Give me a sec to restock.`;
+    }
+
+    if (message.includes("site_obstructed") || message.includes("build bounds") || message.includes("target location")) {
+      return `I couldn't build there — the spot isn't clear. Try somewhere with more open ground.`;
+    }
+
+    return `I tried to build but couldn't get it done. I'm still here if you want to try again somewhere else.`;
+  }
+
+  if (message.includes("permission")) {
+    return `I can't do that one right now.`;
+  }
+
+  // Be honest that retrying is unlikely to help, instead of implying otherwise.
+  return `That one didn't work out on my end. Ask me something else, or try that one again if you want.`;
+}
+
 function normalizeBlockPosition(position) {
   if (!position) {
     return null;
@@ -3108,7 +3151,7 @@ class AgentRuntime {
     });
 
     try {
-      await this.botAdapter.say("I lost the thread for a moment. Ask me again in a second.");
+      await this.botAdapter.say(describeTurnFailure(error, this.companionName));
     } catch (chatError) {
       this.logger.error("[agent] Failed to send fallback chat:", chatError);
     }
