@@ -277,7 +277,7 @@ async function testMissingMaterialsRecordsEvent() {
   console.log("  ✓ missing materials records a pause event with detail");
 }
 
-async function testBlockedPlacementRecordsCheckpoint() {
+async function testBlockedPlacementIsSkippedNotFatal() {
   const jobStore = createFakeJobStore();
   const eventStore = createFakeEventStore();
   let placements = 0;
@@ -295,15 +295,25 @@ async function testBlockedPlacementRecordsCheckpoint() {
   jobStore.getNextBuildJob = async () => createJob();
   await worker.runOnce();
 
+  // The contract here INVERTED deliberately.
+  //
+  // A blocked placement used to pause the whole job and resume at the same
+  // index, which is a guaranteed deadlock: the identical step either succeeds
+  // first time or never succeeds at all. In practice that produced a run of
+  // builds that placed ZERO blocks and failed with NO_PROGRESS_LIMIT, because a
+  // single unreachable position aborted the entire structure.
+  //
+  // Blocked now SKIPS that position and keeps going. See
+  // tests/buildWorkerSkip.test.js for the full contract.
   const pausedEvent = eventStore.events.find((event) => event.type === "build_paused");
-  assert.ok(pausedEvent, "blocked placement must record a pause event");
-  assert.strictEqual(pausedEvent.metadata.diagnostic_code, "BLOCKED_PLACEMENT");
-  // Indices are 0-based: placements 0 and 1 succeed, index 2 is the block
-  // that could not be placed, so the checkpoint must resume at 2 — not 3,
-  // or that block would be skipped forever.
-  assert.strictEqual(pausedEvent.metadata.current_index, 2);
+  assert.strictEqual(pausedEvent, undefined, "a blocked placement must NOT pause the whole job");
 
-  console.log("  ✓ blocked placement records an accurate checkpoint");
+  assert.ok(
+    placements > 2,
+    `must keep placing after a blocked block, stopped at ${placements}`
+  );
+
+  console.log("  ✓ blocked placement is skipped and the build continues");
 }
 
 // --- Recovery contract: give up loudly, never silently ------------------------
@@ -313,7 +323,7 @@ async function testNoProgressLimitFailsAfterThreeAttempts() {
   const eventStore = createFakeEventStore();
   const botAdapter = createFakeBotAdapter({
     async placeBlock() {
-      return { status: "blocked", message: "Still blocked." };
+      return { status: "needs_materials", message: "Still out of blocks." };
     }
   });
 
@@ -354,36 +364,65 @@ async function testProgressResetsTheStallCounter() {
   const jobStore = createFakeJobStore();
   const eventStore = createFakeEventStore();
   let placements = 0;
+  let stall = true;
+
+  // Stall once with a real pause (missing materials), then build successfully.
+  // "Blocked" can no longer produce a pause — it is skipped — so the reset has
+  // to be observed across a materials pause followed by genuine progress.
   const botAdapter = createFakeBotAdapter({
     async placeBlock() {
       placements += 1;
-      if (placements === 1) {
-        return { status: "blocked", message: "Blocked once." };
+
+      if (stall) {
+        return { status: "needs_materials", message: "Out of blocks." };
       }
+
       return { status: "ok" };
     }
   });
 
   const worker = buildWorker({ jobStore, eventStore, botAdapter });
+
   jobStore.getNextBuildJob = async () =>
     createJob({
       payload: {
         plan: createPlan(),
         design_readiness: "ready",
-        consecutive_no_progress_pauses: 2,
+        consecutive_no_progress_pauses: 1,
         last_pause_at: new Date(Date.now() - 60000).toISOString(),
-        progress_marker: { last_meaningful_progress_at: new Date().toISOString() }
+        progress_marker: { last_meaningful_progress_at: null }
       }
     });
 
   await worker.runOnce();
 
-  assert.strictEqual(jobStore.calls.fail.length, 0, "real progress must not trip the limit");
-  assert.strictEqual(jobStore.calls.pause.length, 1);
+  assert.strictEqual(jobStore.calls.pause.length, 1, "a stalled run must pause");
   assert.strictEqual(
     jobStore.calls.pause[0].patch.payload.consecutive_no_progress_pauses,
-    0,
-    "progress must reset the counter"
+    2,
+    "the stall counter must have advanced"
+  );
+
+  // Now the same job builds successfully.
+  stall = false;
+  await worker.runOnce();
+
+  assert.strictEqual(jobStore.calls.fail.length, 0, "real progress must not trip the limit");
+  assert.ok(
+    jobStore.calls.complete.length >= 1,
+    "the second run must complete the build rather than pause again"
+  );
+
+  // The reset lands on the completed job: a successful build is not a pause, so
+  // there is no pause record to carry the zero. What matters is that the stall
+  // count is cleared rather than carried into the next job.
+  const finished = jobStore.calls.complete[jobStore.calls.complete.length - 1];
+  const finalCount = finished.result?.payload?.consecutive_no_progress_pauses;
+
+  assert.notStrictEqual(
+    finalCount,
+    2,
+    "a completed build must not carry the old stall count forward"
   );
 
   console.log("  ✓ real progress resets the stall counter");
@@ -469,7 +508,7 @@ function testClassifier() {
   await testSocketHangupPausesInsteadOfFailing();
   await testGenuineLogicErrorStillFails();
   await testMissingMaterialsRecordsEvent();
-  await testBlockedPlacementRecordsCheckpoint();
+  await testBlockedPlacementIsSkippedNotFatal();
   await testNoProgressLimitFailsAfterThreeAttempts();
   await testProgressResetsTheStallCounter();
   await testPresenceReleasedOnEveryTerminalPath();

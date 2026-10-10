@@ -19,3 +19,6 @@ SELECT status, created_at, last_diagnostic_code, message, current_index FROM job
 SELECT * FROM jobs WHERE type = 'build_structure' AND created_at > '2026-10-10T00:00:00Z' LIMIT 1;
 SELECT status, created_at, last_diagnostic_code, message FROM jobs WHERE type = 'build_structure' AND created_at > '2026-10-10T12:00:00Z' ORDER BY created_at DESC LIMIT 6;
 SELECT * FROM jobs WHERE type = 'build_structure' AND created_at > '2026-10-10T16:00:00Z' LIMIT 1;
+SELECT status, created_at, last_diagnostic_code FROM jobs WHERE type = 'build_structure' AND created_at > '2026-10-10T16:15:00Z' ORDER BY created_at DESC LIMIT 8;
+SELECT error, current_index FROM jobs WHERE type='build_structure' AND created_at > '2026-10-10T16:15:00Z' LIMIT 1;
+SELECT error.inspection FROM jobs WHERE type='build_structure' AND created_at > '2026-10-10T16:15:00Z' LIMIT 1;

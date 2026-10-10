@@ -294,6 +294,10 @@ class BuildWorker {
   }
 
   async executeJob(job, context) {
+    // Per-job, not per-instance: a build must not inherit the previous job's
+    // skipped blocks.
+    this.skippedPlacements = [];
+
     if (typeof this.botAdapter.stopPathing === "function") {
       this.botAdapter.stopPathing();
     }
@@ -343,15 +347,25 @@ class BuildWorker {
 
     const siteInspection = inspectFootprint(this.botAdapter, origin, placementPlan.footprint);
     if (!siteInspection.ok) {
-      await this.safeSay("That spot is too cluttered for the build.");
-      await this.pauseAndReport(job, context, {
-        diagnosticCode: "SITE_OBSTRUCTED",
-        message: "Build site rejected.",
-        resumeDelayMs: BUILD_SITE_RETRY_DELAY_MS,
-        origin,
-        extra: { inspection: siteInspection }
-      });
-      return;
+      // An obstructed site is ADVISORY, not a stop.
+      //
+      // This gate used to abort the build before a single block was placed, so
+      // current_index stayed 0, three identical attempts failed with
+      // NO_PROGRESS_LIMIT, and the child watched a companion refuse to build a
+      // house while telling him to "clear the space" — which it then also could
+      // not do, because the same gate fired again on the retry.
+      //
+      // Obstructions are handled per block below: Guardian clears what it can
+      // reach and skips what it cannot. Progress beats a guaranteed zero, and a
+      // partial build tells the child far more than a refusal.
+      this.logger.warn?.(
+        `[build] site obstructed at ${origin.x},${origin.y},${origin.z}: ` +
+          `${(siteInspection.obstructed_positions || []).length} position(s). ` +
+          "Building anyway and skipping what cannot be reached."
+      );
+      await this.safeSay(
+        "Some of that spot is in the way — I'll build what I can and leave the rest."
+      );
     }
 
     if (this.debugBuildPlans) {
@@ -403,18 +417,31 @@ class BuildWorker {
 
       const result = await this.botAdapter.placeBlock(placement.block, absolute);
 
-      if (result.status === "needs_materials" || result.status === "blocked") {
-        const diagnosticCode =
-          result.status === "needs_materials" ? "MISSING_MATERIALS" : "BLOCKED_PLACEMENT";
+      // A blocked placement means this ONE position cannot be cleared — usually
+      // because it is unreachable (underground, enclosed) or unbreakable.
+      //
+      // It used to abort the whole build and retry the same index, which
+      // guaranteed a deadlock: the identical step can never succeed, so after
+      // three strikes the job failed having placed nothing at all. One buried
+      // block in the footprint zeroed out the entire structure.
+      //
+      // Missing materials are different — restocking genuinely can fix that, so
+      // it still pauses and retries.
+      if (result.status === "blocked") {
+        this.skippedPlacements.push({ block: placement.block, position: absolute });
+        this.logger.warn?.(
+          `[build] skipped ${placement.block} at ${absolute.x},${absolute.y},${absolute.z}: ` +
+            `${result.message || "blocked"}`
+        );
+        continue;
+      }
 
+      if (result.status === "needs_materials") {
         await this.safeSay(result.message || "I got stuck while building.");
         await this.pauseAndReport(job, context, {
-          diagnosticCode,
+          diagnosticCode: "MISSING_MATERIALS",
           message: result.message || "Blocked during build.",
-          resumeDelayMs:
-            result.status === "needs_materials"
-              ? BUILD_MATERIAL_RETRY_DELAY_MS
-              : BUILD_BLOCKED_RETRY_DELAY_MS,
+          resumeDelayMs: BUILD_MATERIAL_RETRY_DELAY_MS,
           origin,
           forcedIndex: index,
           extra: { placement: absolute }
@@ -482,12 +509,23 @@ class BuildWorker {
       }
     });
 
-    await this.safeSay(plan.completionMessage || "The build is finished.");
+    const skipped = this.skippedPlacements || [];
+    let completion = plan.completionMessage || "The build is finished.";
+
+    if (skipped.length) {
+      // Never claim a clean finish when blocks were skipped. A child who asks
+      // for a house and sees a gap deserves to be told there is one.
+      completion += ` (${skipped.length} spot${skipped.length === 1 ? "" : "s"} I couldn't get to.)`;
+    }
+
+    await this.safeSay(completion);
     await this.jobStore.completeJob(job.id, {
       origin,
       completed: true,
       style: plan.style,
-      materials: plan.materials
+      materials: plan.materials,
+      skipped: skipped.length,
+      skipped_placements: skipped.slice(0, 50)
     });
 
     this.releasePresence();
