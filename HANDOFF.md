@@ -179,16 +179,28 @@ real `handleConnectionLoss` through the real kicked→halt→end sequence.
 ### 2.6b The primary player name was simply wrong
 
 `.env` had `PRIMARY_PLAYER=Panda_Nuggetz`. That is not an account on this
-server. The confirmed player is **`SageTheMage5388`**, which Paper knows as
-**`.SageTheMage5388`** because Floodgate 2.x prefixes the username by default.
-Every name-matched behaviour had been silently no-opping against a name that
-does not exist, which is indistinguishable from the software being broken.
+server. This world has **two** real players:
+
+| Account | Who | Bedrock name Paper sees |
+|---|---|---|
+| **PandaNuggetz120** | Resonant Jones (the parent) | `.PandaNuggetz120` |
+| **SageTheMage5388** | his son, aged 10 | `.SageTheMage5388` |
+
+The original `Panda_Nuggetz` was nearly the parent's name — right stem, wrong
+underscore, missing the `120` suffix. Whoever configured this earlier had partial
+information too, and **every name-matched behaviour silently no-opped**.
+
+`MC_RESPOND_TO_ALL=true` is now set, which affects **chat observation only** —
+follow, anchors and `/tp` still key off `PRIMARY_PLAYER`. That is deliberate: on
+a private two-player world, "anyone" means the two of them, and it lets Sage
+talk to the companion without a config change.
+
+When Sage actually plays, set `PRIMARY_PLAYER=SageTheMage5388` so the companion
+follows and tags for him rather than the parent.
 
 Bedrock gamertags routinely carry numeric suffixes, so matching also accepts a
 configured stem against a real player **only when the remainder is digits** —
-`SageTheMage` resolves `SageTheMage5388`, but never `SageTheMageEvil`. That
-fallback is now a safety net rather than the active path; the exact name is
-pinned in `.env`, so no "pin the exact name" warning will be logged.
+`SageTheMage` resolves `SageTheMage5388`, but never `SageTheMageEvil`.
 
 **Never hardcode a guessed gamertag.** Read it from the join log first.
 
