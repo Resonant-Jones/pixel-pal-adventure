@@ -74,12 +74,19 @@ function parseBoolean(value, fallback = false) {
   return String(value).toLowerCase() === "true";
 }
 
+// Every provider startAgent.js can actually build a client for must appear here.
+// DeepSeek was missing from this list, which made normalizeProvider() silently
+// coerce LLM_PROVIDER=deepseek to "groq". The manifest therefore reported Groq
+// to the dashboard while DeepSeek served every real request, and DeepSeek could
+// not be selected in the UI at all. Keep this list in sync with buildLlmClient().
+const SUPPORTED_PROVIDERS = ["minimax", "deepseek", "groq", "ollama"];
+
 function normalizeProvider(value) {
   if (!value) {
     return "groq";
   }
   const normalized = String(value).trim().toLowerCase();
-  if (normalized === "minimax" || normalized === "groq" || normalized === "ollama") {
+  if (SUPPORTED_PROVIDERS.includes(normalized)) {
     return normalized;
   }
   return "groq";
@@ -279,8 +286,11 @@ function validateManifest(manifest) {
     if (!manifest.baseSettings.companionName) {
       errors.push({ path: "baseSettings.companionName", message: "Companion name is required" });
     }
-    if (!["minimax", "groq", "ollama"].includes(manifest.baseSettings.llmProvider)) {
-      errors.push({ path: "baseSettings.llmProvider", message: "LLM provider must be minimax, groq, or ollama" });
+    if (!SUPPORTED_PROVIDERS.includes(manifest.baseSettings.llmProvider)) {
+      errors.push({
+        path: "baseSettings.llmProvider",
+        message: `LLM provider must be one of: ${SUPPORTED_PROVIDERS.join(", ")}`
+      });
     }
   }
 

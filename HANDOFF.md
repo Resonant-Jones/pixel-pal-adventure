@@ -179,15 +179,16 @@ real `handleConnectionLoss` through the real kicked→halt→end sequence.
 ### 2.6b The primary player name was simply wrong
 
 `.env` had `PRIMARY_PLAYER=Panda_Nuggetz`. That is not an account on this
-server — the real player is `SageTheMage` plus numeric digits the operator could
-not recall. Every name-matched behaviour silently no-opped against a name that
+server. The confirmed player is **`SageTheMage5388`**, which Paper knows as
+**`.SageTheMage5388`** because Floodgate 2.x prefixes the username by default.
+Every name-matched behaviour had been silently no-opping against a name that
 does not exist, which is indistinguishable from the software being broken.
 
-Bedrock gamertags routinely carry numeric suffixes, so matching now accepts a
+Bedrock gamertags routinely carry numeric suffixes, so matching also accepts a
 configured stem against a real player **only when the remainder is digits** —
-`SageTheMage` resolves `SageTheMage1847`, but never `SageTheMageEvil`. On the
-first real match the agent logs the exact online name so it can be pinned in
-`.env` and the fallback retired.
+`SageTheMage` resolves `SageTheMage5388`, but never `SageTheMageEvil`. That
+fallback is now a safety net rather than the active path; the exact name is
+pinned in `.env`, so no "pin the exact name" warning will be logged.
 
 **Never hardcode a guessed gamertag.** Read it from the join log first.
 
