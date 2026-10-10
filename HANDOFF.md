@@ -222,6 +222,47 @@ Nothing ever wrote it — it was hand-created once and rotted. That is why
 `startPaperServer.js` now derives operators from `COMPANION_PLAYERS`, and why the
 MOTD no longer hardcodes a name.
 
+### 2.6i "The bot can't jump" was actually the bot tunnelling
+
+Sage said Guardian cannot jump, and the log agreed it was not moving:
+
+```
+[12:36:19] <Guardian> You're up at y71 and I'm down at 66 — you climbed out
+```
+
+The obvious hypotheses are both wrong, and both are worth knowing:
+
+- **Creative flight.** No. mineflayer never auto-enables flight when it sees
+  `gamemode creative`. `bot.creative.startFlying()` is only called by
+  `creative.flyTo()` or by hand, and nothing in this codebase calls either.
+  `bot.physics.gravity` is untouched.
+- **The pathfinder does not auto-jump.** It does — `mineflayer-pathfinder`
+  calls `bot.setControlState('jump', true)` when `canWalkJump` or
+  `canSprintJump` succeeds.
+
+The actual cause is `Movements`' defaults: **`canDig = true` and
+`allow1by1towers = true`**. With Sage standing above Guardian on a ridge, A*
+happily plans a route straight *up through* the blocks. At roughly a second per
+block the bot looks frozen while cheerfully announcing it is following.
+
+`followPlayer` now installs a dedicated Movements profile with `canDig` and
+`allow1by1towers` off, `allowParkour` on. **Build navigation deliberately keeps
+the default profile** at the other `setMovements` call sites, because building
+a wall in front of you needs to place and dig through blocks.
+
+The second half of this landmine is that **follow failure was entirely
+silent**. When no jumpable route exists, the pathfinder sets `forward = false`
+and stands there — no error, no event. Follow now logs the vertical gap it is
+closing and probes five seconds later whether it closed it:
+
+```
+[minecraft] follow Panda_Nuggetz: dy=5 dist=5 from=0,66,0 to=3,71,4
+[minecraft] follow probe: moved=4.12 climb=5 forward=true jump=true
+```
+
+If you see `moved=0.00 climb=0`, the bot genuinely did not move. If you see
+`climb>0`, it climbed and the child may simply have missed it.
+
 ### 2.6b The primary player name was simply wrong
 
 `.env` had `PRIMARY_PLAYER=Panda_Nuggetz` with an underscore, and the world has
