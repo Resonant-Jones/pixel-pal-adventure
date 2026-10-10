@@ -217,6 +217,35 @@ and no supply chain**, so a bot that loses its armour does not replace it.
 Corollary to 2.6c. If a change appears to do nothing, check whether its evidence
 goes to a file at all before concluding it did not run.
 
+### 2.6f ViaVersion is a HARD dependency, not an optional extra
+
+Geyser emulates a **Java 26.2** client. Paper here is **1.21.11** (protocol 774),
+because mineflayer tops out there. Those two facts together mean Geyser cannot
+connect on its own — the server rejects the emulated client as too new.
+
+Without ViaVersion the player sees, verbatim:
+
+```
+This server does not support Java Edition 26.2, which is required for Geyser to
+connect. The server needs to update or have the ViaVersion plugin installed.
+```
+
+And the server log shows only:
+
+```
+Geyser-Spigot: Your server software does not support the Java version that
+Geyser requires (26.2, 26.1.1, 26.1.2).
+```
+
+**Do not "fix" this by upgrading Paper.** That breaks mineflayer and therefore
+the entire companion. ViaVersion 5.12.1 is the bridge: it lets a 26.2-protocol
+client join a 1.21.11 server. It lists both versions in its manifest.
+
+The failure is confusingly *late*: Floodgate authenticates the player
+successfully first, logs `Player connected with username …`, and only then the
+version check kicks them. So the log will show a successful Bedrock login
+immediately before the disconnect. Do not read that as success.
+
 ### 2.7 Floodgate renames the player
 
 Floodgate 2.x defaults `username-prefix` to `"."`. A player configured as
