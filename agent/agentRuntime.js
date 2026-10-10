@@ -1,4 +1,4 @@
-const { matchesPlayerName } = require("../minecraft/playerIdentity");
+const { matchesPlayerName, resolveOnlinePlayerName } = require("../minecraft/playerIdentity");
 const { buildContext, buildAdventureSummaryContext } = require("./contextBuilder");
 const { CommandService } = require("./commandService");
 const { parseBuildRequest } = require("../builder/requestParser");
@@ -1842,7 +1842,36 @@ class AgentRuntime {
   }
 
   isPrimaryPlayer(username) {
-    return matchesPlayerName(this.botAdapter.bot, this.primaryPlayer, username);
+    const matched = matchesPlayerName(this.botAdapter.bot, this.primaryPlayer, username);
+
+    if (matched && typeof username === "string") {
+      this.reportResolvedPrimaryPlayer(username);
+    }
+
+    return matched;
+  }
+
+  // The configured name may be a stem ("SageTheMage") while the server knows
+  // the player as "SageTheMage1847". That resolves correctly, but it should not
+  // stay a guess: say so once, loudly, so the exact name can be pinned in .env
+  // and the stem fallback retired.
+  reportResolvedPrimaryPlayer(observedName) {
+    if (this.primaryPlayerResolved || this.shuttingDown) return;
+
+    const { name, exact } = resolveOnlinePlayerName(this.botAdapter.bot, this.primaryPlayer);
+
+    if (!name || exact) {
+      this.primaryPlayerResolved = true;
+      return;
+    }
+
+    this.primaryPlayerResolved = true;
+    this.logger.warn?.(
+      `[agent] Primary player "${this.primaryPlayer}" matched a numeric-suffix player: ` +
+        `"${name}". Set PRIMARY_PLAYER=${name} in .env to pin the exact name.`
+    );
+
+    this.emitRuntimeEvent("primary_player_resolved", { configured: this.primaryPlayer, resolved: name });
   }
 
   shouldObserve(payload) {

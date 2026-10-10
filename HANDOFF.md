@@ -176,6 +176,46 @@ real `handleConnectionLoss` through the real kicked→halt→end sequence.
 > Keep both guards: `duplicateSessionHalted` in the runtime, and the
 > `CONTROL_PORT` check in `startStack.js`.
 
+### 2.6b The primary player name was simply wrong
+
+`.env` had `PRIMARY_PLAYER=Panda_Nuggetz`. That is not an account on this
+server — the real player is `SageTheMage` plus numeric digits the operator could
+not recall. Every name-matched behaviour silently no-opped against a name that
+does not exist, which is indistinguishable from the software being broken.
+
+Bedrock gamertags routinely carry numeric suffixes, so matching now accepts a
+configured stem against a real player **only when the remainder is digits** —
+`SageTheMage` resolves `SageTheMage1847`, but never `SageTheMageEvil`. On the
+first real match the agent logs the exact online name so it can be pinned in
+`.env` and the fallback retired.
+
+**Never hardcode a guessed gamertag.** Read it from the join log first.
+
+### 2.6c The agent kept no log at all
+
+Everything went to the launching terminal and was lost with the scrollback.
+Diagnosing "why did the bot die" was impossible because the evidence had never
+been written down — three deaths in a single boot could not be explained.
+
+Console output is now teed to `.local/logs/agent.log`: rotated at 8 MB, flushed
+before exit, and a broken log file can never take the agent down. **Read this
+file first for any behavioural question.**
+
+### 2.6d The bot fought with no armour
+
+`equipBestWeapon()` and `equipBestFood()` existed; nothing ever equipped armour.
+Skeletons were the largest single cause of death (22 of 52) because they shoot
+from well outside the 3.5-block melee range — the bot closed the distance eating
+arrows. `equipBestArmor()` now runs before every engagement, per slot.
+
+This only equips what is already in the inventory. There is **no crafting plan
+and no supply chain**, so a bot that loses its armour does not replace it.
+
+### 2.6e The agent used a `console.log` you cannot find afterwards
+
+Corollary to 2.6c. If a change appears to do nothing, check whether its evidence
+goes to a file at all before concluding it did not run.
+
 ### 2.7 Floodgate renames the player
 
 Floodgate 2.x defaults `username-prefix` to `"."`. A player configured as

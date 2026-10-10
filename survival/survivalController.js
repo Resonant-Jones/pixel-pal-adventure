@@ -230,6 +230,16 @@ class SurvivalController {
         this.cooldowns.attackUntil = now + DEFAULTS.attackCooldownMs;
         this.stats.fights += 1;
 
+        // Put on armour before swinging. Skeletons shoot from well outside
+        // melee range, so charging one bare-handed is how the bot used to lose
+        // a fight it should have won. Cheap, idempotent, and never fatal to the
+        // action itself if it throws.
+        try {
+          await this.botAdapter.equipBestArmor?.();
+        } catch (error) {
+          this.logger.warn?.("[survival] equip armour failed:", error?.message || error);
+        }
+
         const result = await this.botAdapter.attackEntity(action.threat.entity, {
           maxDurationMs: 6000,
           signal

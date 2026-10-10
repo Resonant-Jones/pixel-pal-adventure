@@ -176,6 +176,20 @@ const FOOD_PRIORITY = [
   "sweet_berries", "dried_kelp"
 ];
 
+// Armour, best tier first. The bot has no crafting plan and no supply chain, so
+// this only ever equips what is already in its inventory — which is the point:
+// it was previously fighting skeletons and creepers with nothing on but a sword.
+//
+// Skeletons were the single largest cause of death (22 of 52), and they shoot
+// from well outside the 3.5-block melee range. Without armour the bot closes the
+// distance while eating arrows, and loses the fight it should have been winning.
+const ARMOR_PRIORITY = {
+  head: ["netherite_helmet", "diamond_helmet", "iron_helmet", "golden_helmet", "leather_helmet", "chainmail_helmet", "turtle_helmet"],
+  torso: ["netherite_chestplate", "diamond_chestplate", "iron_chestplate", "golden_chestplate", "leather_chestplate", "chainmail_chestplate"],
+  legs: ["netherite_leggings", "diamond_leggings", "iron_leggings", "golden_leggings", "leather_leggings", "chainmail_leggings"],
+  feet: ["netherite_boots", "diamond_boots", "iron_boots", "golden_boots", "leather_boots", "chainmail_boots"]
+};
+
 function normalizeBlockPosition(position) {
   if (!position) {
     return null;
@@ -1502,6 +1516,48 @@ class MinecraftBotAdapter extends EventEmitter {
       this.logger.warn?.("[survival] equip weapon failed:", error?.message || error);
       return null;
     }
+  }
+
+  // Wear the best armour available, slot by slot. Each slot is independent: one
+  // failure must not prevent the remaining three from being equipped.
+  async equipBestArmor() {
+    const bot = this.bot;
+
+    if (!bot?.inventory) {
+      return null;
+    }
+
+    const equipped = {};
+
+    for (const [slot, names] of Object.entries(ARMOR_PRIORITY)) {
+      try {
+        const item = this.findInventoryItemLowestDurability(names);
+
+        if (!item) {
+          continue;
+        }
+
+        // Already wearing something better in this slot? Leave it alone.
+        const worn = bot.inventory.slots[bot.inventory.getEquipmentDestSlot?.(slot) ?? -1];
+        const wornName = worn?.name || null;
+
+        if (wornName && names.includes(wornName)) {
+          continue;
+        }
+
+        await bot.equip(item, slot);
+        equipped[slot] = item.name;
+      } catch (error) {
+        this.logger.warn?.(
+          `[survival] equip ${slot} failed:`,
+          error?.message || error
+        );
+      }
+    }
+
+    const slots = Object.keys(equipped);
+
+    return slots.length ? equipped : null;
   }
 
   async equipBestFood() {

@@ -4,6 +4,11 @@ require("dotenv").config();
 
 const crypto = require("crypto");
 
+// Install the log tee before anything else can log, so nothing from the very
+// first line of startup is lost.
+const { installAgentLogTee } = require("./agentLog");
+const agentLogStream = installAgentLogTee();
+
 const { AgentRuntime } = require("../agent/agentRuntime");
 const { ActionExecutor } = require("../agent/actionExecutor");
 const { MiniMaxClient } = require("../ai/minimaxClient");
@@ -278,6 +283,13 @@ async function main() {
     console.log(`[agent] ${signal} received, shutting down Guardian.`);
     await controlServer.close();
     await runtime.stop();
+
+    // process.exit() discards anything still sitting in the log stream's
+    // buffer, which would cost exactly the shutdown lines most worth keeping.
+    if (agentLogStream) {
+      await new Promise((resolve) => agentLogStream.end(resolve));
+    }
+
     process.exit(0);
   };
 
