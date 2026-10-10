@@ -450,27 +450,36 @@ class MinecraftBotAdapter extends EventEmitter {
     });
   }
 
-  // World rules this companion expects, applied on every spawn.
-  //
-  // Kept here rather than in a manual setup step because the operator has no
-  // console: Guardian is opped, so it can set them itself, and it means the
-  // rules survive a restart or a fresh world without anyone remembering.
-  //
-  // Best-effort by design. A failure must never block the bot from spawning.
-  async applyStartupGamerules(bot) {
-    const rules = [
+  // World setup this companion expects, applied on every spawn.
+//
+// Kept here rather than in a manual setup step because the operator has no
+// console: Guardian is opped, so it can set these itself, and it means the
+// rules survive a restart or a fresh world without anyone remembering.
+//
+// The gamemode line is the important one. Guardian is a service, not a player:
+// in survival it has no materials, so it cannot place a single block, and a
+// site with any obstruction is an unbreakable deadlock — it fails with
+// NO_PROGRESS_LIMIT after three attempts having built nothing. Creative removes
+// the need for materials entirely, lets it overwrite obstructions instead of
+// dying on them, and incidentally makes it immune to the mobs that have killed
+// it 52 times. The child keeps his own gamemode; this only changes the bot.
+//
+// Best-effort by design. A failure must never block the bot from spawning.
+async applyStartupGamerules(bot) {
+    const settings = [
+      { command: "/gamemode creative", label: "gamemode creative" },
       { command: "/gamerule keepInventory true", label: "keepInventory" },
       { command: "/gamerule doDaylightCycle true", label: "doDaylightCycle" },
       { command: "/gamerule naturalRegeneration true", label: "naturalRegeneration" }
     ];
 
-    for (const rule of rules) {
+    for (const setting of settings) {
       try {
-        await this.runCommand(rule.command);
-        this.logger.info?.(`[minecraft] gamerule ${rule.label} applied`);
+        await this.runCommand(setting.command);
+        this.logger.info?.(`[minecraft] ${setting.label} applied`);
       } catch (error) {
         this.logger.warn?.(
-          `[minecraft] could not apply ${rule.label}:`,
+          `[minecraft] could not apply ${setting.label}:`,
           error?.message || error
         );
       }
