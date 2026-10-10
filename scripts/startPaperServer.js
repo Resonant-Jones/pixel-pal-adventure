@@ -23,7 +23,7 @@
 
 const fs = require("fs");
 const path = require("path");
-const crypto = require("crypto");
+const { writeOperators } = require("./serverOperators");
 const { spawn, spawnSync } = require("child_process");
 const https = require("https");
 const http = require("http");
@@ -226,118 +226,15 @@ eula=true
     log("Wrote eula.txt (accepted)");
   }
 
-  // Paper's offline-mode UUID for a plain Java account: a version 3 (MD5) UUID
-// over "OfflinePlayer:<name>".
-//
-// This is correct ONLY for non-Floodgate players. Bedrock accounts arriving via
-// Floodgate get 00000000-0000-0000-0009-<xuid> instead, which cannot be derived
-// from the username at all — read those from usercache.json.
-function offlinePlayerUuid(username) {
-  const digest = crypto.createHash("md5").update(`OfflinePlayer:${username}`, "utf8").digest();
-  digest[6] = (digest[6] & 0x0f) | 0x30; // version 3
-  digest[8] = (digest[8] & 0x3f) | 0x80; // RFC 4122 variant
-  const hex = digest.toString("hex");
-
-  return [
-    hex.slice(0, 8),
-    hex.slice(8, 12),
-    hex.slice(12, 16),
-    hex.slice(16, 20),
-    hex.slice(20)
-  ].join("-");
-}
-
-// Read Paper's authoritative name -> UUID map.
-//
-// This exists because computing UUIDs by hand is WRONG for Bedrock players.
-// Floodgate issues its own UUIDs in the form 00000000-0000-0000-0009-<xuid>,
-// NOT the offline-mode MD5 UUID. An op entry written with a computed UUID looks
-// perfectly correct, matches the right username, and silently does nothing —
-// Paper keys operators by UUID, so the player stays a Member and nobody can see
-// why. That exact mistake cost a full session's worth of confusion.
-//
-// usercache.json is maintained by the server itself and holds the real UUID for
-// every account that has ever joined, Java and Bedrock alike.
-function readUserCache() {
-  const cachePath = path.join(SERVER_DIR, "usercache.json");
-
-  try {
-    if (!fs.existsSync(cachePath)) {
-      return new Map();
-    }
-
-    const entries = JSON.parse(fs.readFileSync(cachePath, "utf-8"));
-    const byName = new Map();
-
-    for (const entry of Array.isArray(entries) ? entries : []) {
-      if (entry?.name && entry?.uuid) {
-        byName.set(entry.name, entry.uuid);
-      }
-    }
-
-    return byName;
-  } catch (error) {
-    warn(`Could not read usercache.json: ${error.message}`);
-    return new Map();
-  }
-}
-
-// Floodgate gives Bedrock usernames a "." prefix, so the account Paper knows is
-// ".PandaNuggetz120" even though the gamertag is "PandaNuggetz120". Ops must be
-// recorded against the name the server actually sees.
-function floodgateName(username) {
-  const name = String(username || "").trim();
-
-  if (!name) return "";
-  if (["." , "*", "+", "-"].some((p) => name.startsWith(p) && name.length > p.length)) {
-    return name;
-  }
-
-  return `.${name}`;
-}
-
-function writeOperators() {
+  function parseConfiguredPlayers() {
   const botUsername = process.env.MC_BOT_USERNAME || "Guardian";
-  const companionPlayers = String(process.env.COMPANION_PLAYERS || "")
-    .split(",")
-    .map((name) => floodgateName(name))
-    .filter(Boolean);
+  const primary = process.env.PRIMARY_PLAYER || process.env.MC_PRIMARY_PLAYER || "";
+  const companions = String(process.env.COMPANION_PLAYERS || "").split(",");
 
-  const primary = floodgateName(process.env.PRIMARY_PLAYER || process.env.MC_PRIMARY_PLAYER);
-  const names = Array.from(new Set([botUsername, primary, ...companionPlayers].filter(Boolean)));
-
-  const userCache = readUserCache();
-  const operators = [];
-  const unknown = [];
-
-  for (const name of names) {
-    // Prefer the UUID the server itself recorded. Only fall back to computing
-    // one for a plain Java account, where the offline-mode scheme is correct.
-    let uuid = userCache.get(name);
-
-    if (!uuid && name === botUsername) {
-      uuid = offlinePlayerUuid(name);
-    }
-
-    if (!uuid) {
-      unknown.push(name);
-      continue;
-    }
-
-    operators.push({ uuid, name, level: 4, bypassesPlayerLimit: false });
-  }
-
-  const opsPath = path.join(SERVER_DIR, "ops.json");
-  fs.writeFileSync(opsPath, `${JSON.stringify(operators, null, 2)}\n`, "utf-8");
-  log(`Wrote ops.json for ${operators.length} account(s): ${operators.map((o) => o.name).join(", ")}`);
-
-  if (unknown.length) {
-    warn(
-      `No UUID recorded yet for: ${unknown.join(", ")}. ` +
-        "A Bedrock account's UUID only exists after it joins once — " +
-        "run this again after they have, or they will show as a Member."
-    );
-  }
+  return {
+    botUsername,
+    configured: Array.from(new Set([primary, ...companions].map((n) => String(n).trim()).filter(Boolean)))
+  };
 }
 
 const propsPath = path.join(SERVER_DIR, "server.properties");
@@ -366,7 +263,7 @@ generate-structures=true
   fs.writeFileSync(propsPath, props, "utf-8");
   log(`Wrote server.properties (port ${PORT})`);
 
-  writeOperators();
+  writeOperators({ serverDir: SERVER_DIR, env: process.env, logger: { log, warn } });
 
   const javaBin = findJava();
   if (!javaBin) {

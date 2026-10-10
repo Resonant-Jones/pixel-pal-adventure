@@ -224,31 +224,25 @@ MOTD no longer hardcodes a name.
 
 ### 2.6b The primary player name was simply wrong
 
-`.env` had `PRIMARY_PLAYER=Panda_Nuggetz`. That is not an account on this
-server. This world has **two** real players:
+`.env` had `PRIMARY_PLAYER=Panda_Nuggetz` with an underscore, and the world has
+**two** accounts belonging to the same person, differing by client:
 
-| Account | Who | Bedrock name Paper sees |
+| Account | Client | Paper path |
 |---|---|---|
-| **PandaNuggetz120** | Resonant Jones (the parent) | `.PandaNuggetz120` |
-| **SageTheMage5388** | his son, aged 10 | `.SageTheMage5388` |
+| **Panda_Nuggetz** | Java on desktop | direct to 25565 |
+| **.PandaNuggetz120** | Bedrock (iPad) | via Geyser, Floodgate adds the dot |
 
-The original `Panda_Nuggetz` was nearly the parent's name — right stem, wrong
-underscore, missing the `120` suffix. Whoever configured this earlier had partial
-information too, and **every name-matched behaviour silently no-opped**.
+The early configs mixed these up: `Panda_Nuggetz` (correct Java name) was called
+a dead account and removed from ops.json, while `.PandaNuggetz120` was treated as
+the only real one. Both are real. **Both must be opped.**
 
-`MC_RESPOND_TO_ALL=true` is now set, which affects **chat observation only** —
-follow, anchors and `/tp` still key off `PRIMARY_PLAYER`. That is deliberate: on
-a private two-player world, "anyone" means the two of them, and it lets Sage
-talk to the companion without a config change.
+The lesson is not "which name is right" — it is that a Floodgate dot is a property
+of *one account*, not a rule to apply to every name. `COMPANION_PLAYERS` accepts
+bare gamertags of both kinds and resolves each through `usercache.json`.
 
-When Sage actually plays, set `PRIMARY_PLAYER=SageTheMage5388` so the companion
-follows and tags for him rather than the parent.
+Do not hardcode a guessed gamertag. Read it from the join log first.
 
-Bedrock gamertags routinely carry numeric suffixes, so matching also accepts a
-configured stem against a real player **only when the remainder is digits** —
-`SageTheMage` resolves `SageTheMage5388`, but never `SageTheMageEvil`.
-
-**Never hardcode a guessed gamertag.** Read it from the join log first.
+### 2.6c The agent kept no log at all
 
 ### 2.6c The agent kept no log at all
 

@@ -28,6 +28,14 @@ const ROOT = path.resolve(__dirname, "..");
 const SERVER_DIR = path.join(ROOT, "minecraft-server");
 const LOG_DIR = path.join(ROOT, ".local", "logs");
 
+// Load .env before anything reads configuration. This script launches Paper
+// directly rather than through startPaperServer.js, so without this it cannot
+// see PRIMARY_PLAYER or COMPANION_PLAYERS — and ops would silently reduce to the
+// bot alone.
+require("dotenv").config({ path: path.join(ROOT, ".env") });
+
+const { writeOperators } = require("./serverOperators");
+
 const MC_PORT = Number(process.env.PAPER_PORT || 25565);
 const SURREAL_PORT = Number(process.env.SURREAL_PORT || 8001);
 const BEDROCK_PORT = Number(process.env.BEDROCK_PORT || 19132);
@@ -157,6 +165,11 @@ async function startPaper() {
 
   fs.mkdirSync(LOG_DIR, { recursive: true });
   const out = fs.openSync(path.join(LOG_DIR, "paper.log"), "a");
+
+  // Ops are read ONCE, at boot. Writing ops.json after Paper has started does
+  // nothing at all. So it has to happen here, immediately before the spawn —
+  // this is the only launch path that matters, and it must never be skipped.
+  writeOperators({ serverDir: SERVER_DIR, env: process.env, logger: { log, warn } });
 
   const child = spawn(java, ["-Xms1G", "-Xmx2G", "-jar", jar, "--nogui"], {
     cwd: SERVER_DIR,
