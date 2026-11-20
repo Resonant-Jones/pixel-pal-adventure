@@ -31,6 +31,7 @@ const { ProfileStore } = require("../memory/profileStore");
 const { ReflexStateStore } = require("../memory/reflexStateStore");
 const { SessionStore } = require("../memory/sessionStore");
 const { SurrealClient } = require("../memory/surrealClient");
+const { VoiceService } = require("../voice/voiceService");
 const { WorldStore } = require("../memory/worldStore");
 const { MinecraftBotAdapter } = require("../minecraft/bot");
 const { loadOrCreateManifest, resolveEffectiveSettings } = require("./loadSettingsManifest");
@@ -238,7 +239,13 @@ async function main() {
     debugBuildPlans: runtimeConfig.debugBuildPlans
   });
 
+  // Voice is transport-agnostic: the service synthesises and transcribes, and
+  // publishes both as events. Whatever is carrying the voice — a Bedrock
+  // Voice Chat client, a local companion app — subscribes to it.
+  const voiceService = new VoiceService({ logger: console });
+
   runtime = new AgentRuntime({
+    voiceService,
     botAdapter,
     messageStore,
     eventStore,
@@ -286,6 +293,7 @@ async function main() {
   const controlServer = new LocalControlServer({
     runtime,
     eventBus,
+    voiceService,
     host: runtimeConfig.controlPlane.host,
     port: runtimeConfig.controlPlane.port,
     authToken: runtimeConfig.controlPlane.token

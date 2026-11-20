@@ -167,6 +167,7 @@ class AgentRuntime {
     reflexIdleThresholdMs = 90000,
     allowAutoGiveBuildMaterials = false,
     debugBuildPlans = false,
+    voiceService = null,
     logger = console
   }) {
     this.botAdapter = botAdapter;
@@ -208,12 +209,14 @@ class AgentRuntime {
     this.allowAutoGiveBuildMaterials = allowAutoGiveBuildMaterials;
     this.debugBuildPlans = debugBuildPlans;
     this.logger = logger;
+    this.voiceService = voiceService;
     this.feedbackBroker = new FeedbackBroker({ logger });
     this.firstGreet = new FirstGreet({
       logger,
       primaryPlayer: this.primaryPlayer,
       companionName: this.companionName
     });
+    this.installVoiceHook();
     this.bound = false;
     this.readyForTurns = false;
     this.observedChatCount = 0;
@@ -886,6 +889,73 @@ class AgentRuntime {
   isActiveSpeaker(username) {
     if (typeof username !== "string" || !username.trim()) return false;
     return this.isApprovedPlayer(username) || this.guestMode !== "ignore";
+  }
+
+  // Hook the voice onto the one place every spoken line goes through.
+  //
+  // Chat replies, reflex messages, build feedback and the greeting all end up
+  // in botAdapter.say(). Wrapping it means the voice can never be forgotten in
+  // a new code path — and it means a failure in the voice layer can never
+  // break the game, because the real say() has already happened by the time
+  // the audio is requested.
+  installVoiceHook() {
+    if (!this.voiceService) {
+      return;
+    }
+
+    const adapter = this.botAdapter;
+    const originalSay = adapter.say.bind(adapter);
+
+    adapter.say = async (text) => {
+      const result = await originalSay(text);
+
+      try {
+        void this.voiceService.speak(text, { reason: "say" });
+      } catch (error) {
+        this.logger.warn?.(`[voice] hook failed: ${error?.message || error}`);
+      }
+
+      return result;
+    };
+  }
+
+  async speakLine(text, { reason = "say" } = {}) {
+    if (!this.voiceService) {
+      return { ok: false, skipped: "no_voice_service" };
+    }
+
+    try {
+      return await this.voiceService.speak(text, { reason });
+    } catch (error) {
+      this.logger.warn?.(`[voice] speak failed: ${error?.message || error}`);
+      return { ok: false, error: error?.message || String(error) };
+    }
+  }
+
+  // A companion app heard the player speak. Treat it exactly like chat: the
+  // same trust tier, the same scope rules, the same reply in game and in
+  // voice. Voice is a different sensor, not a different privilege.
+  async handleVoiceInput({ speaker = null, text = "" } = {}) {
+    const message = String(text || "").trim();
+
+    if (!message) {
+      return { ok: false, error: "empty" };
+    }
+
+    const username = String(speaker || this.primaryPlayer).trim();
+
+    await this.handleChat({
+      username,
+      message,
+      directMention: true,
+      source: "voice"
+    });
+
+    return { ok: true, speaker: username, message };
+  }
+
+  listSpokenLines(limit = 20) {
+    return this.voiceService?.listSpoken?.(limit) || [];
   }
 
   // Who is speaking, and therefore what they are allowed to reach.

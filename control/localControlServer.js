@@ -1,6 +1,7 @@
 const http = require("http");
 const { URL } = require("url");
 
+const fs = require("fs");
 const { WebSocketServer } = require("ws");
 
 function json(response, statusCode, body) {
@@ -34,6 +35,30 @@ function readJsonBody(request) {
   });
 }
 
+// Read a raw request body. Used for captured audio, which arrives as binary
+// rather than JSON. The size cap matters: this is a local server but it is
+// reachable by anything on the loopback interface, including a companion app
+// that has gone wrong.
+function readBinaryBody(request, limitBytes = 12 * 1024 * 1024) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let total = 0;
+
+    request.on("data", (chunk) => {
+      total += chunk.length;
+      if (total > limitBytes) {
+        reject(new Error("body_too_large"));
+        request.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+
+    request.on("end", () => resolve(Buffer.concat(chunks)));
+    request.on("error", reject);
+  });
+}
+
 function buildAuthChecker(token) {
   return (requestUrl, headers = {}) => {
     if (!token) {
@@ -57,10 +82,12 @@ class LocalControlServer {
     host = "127.0.0.1",
     port = 8787,
     authToken = "",
+    voiceService = null,
     logger = console
   }) {
     this.runtime = runtime;
     this.eventBus = eventBus;
+    this.voiceService = voiceService;
     this.host = host;
     this.port = port;
     this.authToken = authToken;
@@ -68,6 +95,7 @@ class LocalControlServer {
     this.server = null;
     this.websocketServer = null;
     this.clients = new Set();
+    this.voiceClients = new Set();
     this.ready = false;
     this.heartbeatTimer = null;
     this.isAuthorized = buildAuthChecker(authToken);
@@ -79,6 +107,24 @@ class LocalControlServer {
         }
       }
     };
+    this.onVoiceSpeak = (entry) => {
+      const payload = {
+        type: "speak",
+        id: entry.id,
+        text: entry.text,
+        reason: entry.reason,
+        durationMs: entry.durationMs,
+        format: entry.format,
+        audioUrl: `/voice/audio/${entry.id}`
+      };
+      const serialized = JSON.stringify(payload);
+      for (const client of this.voiceClients) {
+        if (client.readyState === client.OPEN) {
+          client.send(serialized);
+        }
+      }
+    };
+    this.voiceService?.on?.("speak", this.onVoiceSpeak);
   }
 
   isReady() {
@@ -141,6 +187,69 @@ class LocalControlServer {
       return;
     }
 
+    if (request.method === "GET" && requestUrl.pathname === "/voice/spoken") {
+      json(response, 200, {
+        ok: true,
+        enabled: Boolean(this.voiceService?.enabled),
+        spoken: this.runtime?.listSpokenLines?.(50) || []
+      });
+      return;
+    }
+
+    if (request.method === "POST" && requestUrl.pathname === "/voice/say") {
+      const body = await readJsonBody(request);
+      const result = await this.runtime.speakLine(body.text || "", {
+        reason: body.reason || "control"
+      });
+      json(response, 200, { ok: true, ...result });
+      return;
+    }
+
+    if (request.method === "POST" && requestUrl.pathname === "/voice/transcribe") {
+      const audio = await readBinaryBody(request);
+      const filename = requestUrl.searchParams.get("filename") || "capture.wav";
+      const speaker = requestUrl.searchParams.get("speaker") || null;
+
+      const transcribed = await this.voiceService.transcribe(audio, { filename, speaker });
+
+      if (!transcribed.ok) {
+        json(response, 400, { ok: false, error: transcribed.error || transcribed.skipped });
+        return;
+      }
+
+      const handled = await this.runtime.handleVoiceInput({
+        speaker: transcribed.speaker,
+        text: transcribed.text
+      });
+
+      json(response, 200, { ok: true, transcript: transcribed.text, ...handled });
+      return;
+    }
+
+    if (request.method === "GET" && requestUrl.pathname.startsWith("/voice/audio/")) {
+      const id = requestUrl.pathname.replace("/voice/audio/", "");
+      const audioPath = this.voiceService?.getAudioPath?.(id);
+
+      if (!audioPath || !fs.existsSync(audioPath)) {
+        json(response, 404, { ok: false, error: "not_found" });
+        return;
+      }
+
+      const extension = audioPath.split(".").pop();
+      const contentType = extension === "wav"
+        ? "audio/wav"
+        : extension === "flac"
+          ? "audio/flac"
+          : "audio/mpeg";
+
+      response.writeHead(200, {
+        "Content-Type": contentType,
+        "Content-Length": fs.statSync(audioPath).size
+      });
+      fs.createReadStream(audioPath).pipe(response);
+      return;
+    }
+
     if (request.method === "POST" && requestUrl.pathname.startsWith("/command/")) {
       const body = await readJsonBody(request);
       const type = requestUrl.pathname.replace("/command/", "").replace(/-/g, "_");
@@ -170,13 +279,34 @@ class LocalControlServer {
     this.websocketServer = new WebSocketServer({ noServer: true });
     this.server.on("upgrade", (request, socket, head) => {
       const requestUrl = new URL(request.url || "/", `http://${this.host}:${this.port}`);
-      if (requestUrl.pathname !== "/events" || !this.isAuthorized(request.url || "/", request.headers || {})) {
+      const isEvents = requestUrl.pathname === "/events";
+      const isVoice = requestUrl.pathname === "/voice";
+
+      if ((!isEvents && !isVoice) || !this.isAuthorized(request.url || "/", request.headers || {})) {
         socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
         socket.destroy();
         return;
       }
 
       this.websocketServer.handleUpgrade(request, socket, head, (websocket) => {
+        if (isVoice) {
+          this.voiceClients.add(websocket);
+          websocket.on("close", () => {
+            this.voiceClients.delete(websocket);
+          });
+
+          // Catch the companion app up on what Guardian already said, so a
+          // reconnect does not lose the last few lines.
+          websocket.send(
+            JSON.stringify({
+              type: "voice_ready",
+              enabled: Boolean(this.voiceService?.enabled),
+              spoken: this.runtime?.listSpokenLines?.(20) || []
+            })
+          );
+          return;
+        }
+
         this.clients.add(websocket);
         websocket.on("close", () => {
           this.clients.delete(websocket);
@@ -223,9 +353,15 @@ class LocalControlServer {
         client.close();
       }
       this.clients.clear();
+      for (const client of this.voiceClients) {
+        client.close();
+      }
+      this.voiceClients.clear();
       this.websocketServer.close();
       this.websocketServer = null;
     }
+
+    this.voiceService?.off?.("speak", this.onVoiceSpeak);
 
     if (this.server) {
       const server = this.server;
