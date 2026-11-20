@@ -44,8 +44,35 @@ places Guardian's voice at Guardian's actual position in the world.
 **That is what "synchronized in the game" means, and it comes for free from the
 mod rather than from anything I have to build.**
 
-`VoiceCraft` is the alternative with the widest platform support and a Paper
-bridge. It is the fallback if BVC's client app proves awkward on macOS.
+### The good news about your son playing Java
+
+The son plays Java on the desktop as well as Bedrock on the iPad, and that
+materially simplifies the transport.
+
+**BVC bridges to Simple Voice Chat.** From the BVC wiki: *"Bedrock Voice Chat
+connects to Simple Voice Chat (SVC). Java players on Simple Voice Chat and
+players on the BVC app can then hear each other in the same world."* And with
+an embedded server, *"BVC configures the bridge automatically."*
+
+So one server-side setup serves **both** of his clients:
+
+| Where he plays | What he installs | What he needs |
+|---|---|---|
+| **Java desktop** | the Simple Voice Chat client mod | Fabric/NeoForge/Forge/Quilt — a modded client profile |
+| **Bedrock iPad** | the BVC app | TestFlight, one pairing step |
+| **This Mac** (Guardian's voice) | the BVC macOS client | already staged and hash-verified |
+
+And the server side is just two Paper plugins: BVC, plus Simple Voice Chat,
+with BVC in embedded mode so the bridge wires itself up.
+
+The desktop route is probably the easier of the two for him — a mod install on
+a client he already runs, rather than TestFlight on a tablet. It is also the
+route where proximity voice works most naturally, because SVC is a Java-native
+proximity system and the BVC bridge maps positions across.
+
+`VoiceCraft` remains the fallback: wider platform support, a Paper bridge of
+its own, and it works with Geyser. It is the option to reach for if SVC turns
+out to be awkward to install on his desktop client.
 
 ### What this means operationally
 
@@ -255,14 +282,15 @@ PCM with no container is rejected by the provider. Max body 12 MB.
 | # | Step | Owner | Notes |
 |---|---|---|---|
 | 1 | Install the BVC Paper plugin | me | `bvc-paper-plugin-1.0.0-beta.15.jar` is **staged and hash-verified**. Needs a Paper restart — `scripts/restartPaper.sh`, which is yours to run because the agent cannot signal Paper. |
-| 2 | Write `plugins/BedrockVoiceChat/config.yml` | me | Embedded mode: `use-embedded-server: true` plus the `embedded-config` block. No separate server, no Docker, no extra port. |
-| 3 | **Get a domain and a valid certificate** | **you** | The one genuinely hard requirement. Assigned hostname (no domain, Patreon/YouTube-gated) or a domain with Cloudflare DNS-01. Self-signed is refused outright. |
-| 4 | Install BlackHole | me | `brew install blackhole-2ch`, then wire the device in Audio MIDI Setup. |
-| 5 | Build the companion app | **you** | The contract is §4. It is a small local app: one WebSocket, one HTTP POST, and audio routing. |
-| 6 | Install the BVC client app on the son's iPad | **you** | TestFlight — the iOS build has no release asset. |
-| 7 | The first spoken conversation | both of you | The acceptance test. It has not happened yet, and nothing above proves it will. |
+| 2 | Install the Simple Voice Chat Paper plugin | me | This is what lets your son hear Guardian **from his Java desktop client** as well as the iPad. The BVC↔SVC bridge is automatic in embedded mode. |
+| 3 | Write `plugins/BedrockVoiceChat/config.yml` | me | Embedded mode: `use-embedded-server: true` plus the `embedded-config` block. No separate server, no Docker, no extra port. |
+| 4 | **Get a domain and a valid certificate** | **you** | The one genuinely hard requirement. Assigned hostname (no domain, Patreon/YouTube-gated) or a domain with Cloudflare DNS-01. Self-signed is refused outright. |
+| 5 | Install BlackHole | me | `brew install blackhole-2ch`, then wire the device in Audio MIDI Setup. |
+| 6 | Build the companion app | **you** | The contract is §4. It is a small local app: one WebSocket, one HTTP POST, and audio routing. |
+| 7 | Install the voice client on his clients | **you** | Java desktop: the Simple Voice Chat mod. iPad: the BVC app from TestFlight. |
+| 8 | The first spoken conversation | both of you | The acceptance test. It has not happened yet, and nothing above proves it will. |
 
-Steps 3, 5 and 6 need you. Everything else is mine.
+Steps 4, 6 and 7 need you. Everything else is mine.
 
 ### The plan if TLS is the blocker
 
