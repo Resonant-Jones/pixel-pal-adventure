@@ -76,9 +76,20 @@ async function main() {
     assert.equal(adapter.followed.at(-1), "Panda_Nuggetz");
     assert.deepEqual(runtime.reasoned, ["hello there"], "direct commands bypass reasoning");
     assert.equal(adapter.said.filter((text) => text.startsWith("Hi ")).length, 1);
-    assert.equal(runtime.getDirectCommand({ username: "Other", message: "follow me" }), null);
-    assert.equal(runtime.shouldRespond({ username: "Other", message: "hello" }), false);
+    assert.equal(runtime.shouldRespond({ username: "Other", message: "hello" }), false, "an unknown player is still not answered");
     assert.equal(runtime.shouldObserve({ username: "Other", directMention: true }), false, "a mention does not grant access to the child's memory lane");
+
+    // A second, known player is a full participant: they can use direct commands
+    // and their messages stay in the conversation lane. Restricting this to the
+    // primary player is what made a friend invisible and the bot seem aloof.
+    runtime.companionPlayers = ["Panda_Nuggetz", ".Marallren"];
+    assert.notEqual(runtime.getDirectCommand({ username: ".Marallren", message: "follow me" }), null,
+      "a known second player may use direct commands");
+    assert.equal(runtime.getDirectCommand({ username: "Stranger", message: "follow me" }), null,
+      "an unknown player still cannot");
+    assert.equal(runtime.shouldObserve({ username: ".Marallren", message: "hi" }), true);
+    assert.ok(runtime.getKnownPlayers().includes(".Marallren"), "the roster names the second player");
+    assert.ok(runtime.isKnownPlayer(".Marallren"), "and resolves their Floodgate spelling");
     // Run one ordinary turn through the actual context -> model -> executor
     // path. The model here is synthetic; this makes no provider API request.
     runtime.currentWorld = { world_id: "synthetic-world" };

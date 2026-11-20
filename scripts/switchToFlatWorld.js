@@ -242,15 +242,118 @@ function rollback() {
   log("NOTE: the generated world folder is left in place; delete it by hand if unwanted");
 }
 
+// ---------------------------------------------------------------------------
+// --cutover: run the whole swap unattended once the server is down.
+// ---------------------------------------------------------------------------
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function waitForPort(shouldBeOpen, timeoutMs, label) {
+  const deadline = Date.now() + timeoutMs;
+  let last = null;
+  while (Date.now() < deadline) {
+    const open = await serverIsListening();
+    if (open === shouldBeOpen) return true;
+    last = open;
+    await sleep(1000);
+  }
+  log(`timed out after ${timeoutMs}ms waiting for port ${PORT} to be ${shouldBeOpen ? "open" : "free"}`);
+  return false;
+}
+
+function findPaperJar() {
+  const jars = fs
+    .readdirSync(SERVER_DIR)
+    .filter((f) => /^paper-.*\.jar$/.test(f))
+    .sort();
+  if (!jars.length) throw new Error(`no Paper jar in ${SERVER_DIR} - run: npm run mc:server`);
+  return path.join(SERVER_DIR, jars[jars.length - 1]);
+}
+
+async function startPaper() {
+  const { spawnSync } = require("child_process");
+  const which = spawnSync("which", ["java"], { encoding: "utf-8" });
+  if (which.status !== 0) throw new Error("no 'java' on PATH");
+
+  const jar = findPaperJar();
+  const logDir = path.resolve(SERVER_DIR, "..", ".local");
+  fs.mkdirSync(logDir, { recursive: true });
+  const out = fs.openSync(path.join(logDir, "paper-cutover.log"), "a");
+
+  const child = require("child_process").spawn(
+    "java",
+    ["-Xms1G", "-Xmx2G", "-jar", jar, "--nogui"],
+    { cwd: SERVER_DIR, detached: true, stdio: ["ignore", out, out] }
+  );
+  child.unref();
+  log(`spawned Paper (pid ${child.pid}), waiting for port ${PORT}…`);
+  return child.pid;
+}
+
+async function stopPaper(pid) {
+  try {
+    process.kill(pid, "SIGTERM");
+    log(`SIGTERM -> pid ${pid}, waiting for graceful save…`);
+  } catch (e) {
+    log(`could not signal pid ${pid}: ${e.message}`);
+    return false;
+  }
+  return waitForPort(false, 90000, "paper");
+}
+
+async function cutover() {
+  if (await serverIsListening()) {
+    log(`Paper is STILL listening on ${PORT}.`);
+    log("Stop the server first, then run this again:");
+    log("  Ctrl-C in the terminal running scripts/startStack.js");
+    log("  or:  kill <paper-pid>");
+    log("(this script cannot signal a process it did not start - the OS refuses)");
+    process.exit(1);
+  }
+  log(`port ${PORT} is free`);
+
+  log("");
+  log("STEP 1/4  apply flat world settings");
+  applyProps();
+
+  log("");
+  log("STEP 2/4  boot Paper so " + TARGET_WORLD + " generates");
+  const pid = await startPaper();
+  if (!(await waitForPort(true, 180000, "paper"))) throw new Error("Paper never opened its port");
+  // Give the spawn chunk time to be written before we stop again.
+  await sleep(8000);
+  verify(TARGET_WORLD);
+
+  log("");
+  log("STEP 3/4  stop Paper, then disable mob spawning");
+  if (!(await stopPaper(pid))) throw new Error("could not stop Paper - rerun with --gamerules later");
+  patchGamerules();
+
+  log("");
+  log("STEP 4/4  start Paper on the flat world");
+  const pid2 = await startPaper();
+  if (!(await waitForPort(true, 180000, "paper"))) throw new Error("Paper never reopened its port");
+  await sleep(5000);
+
+  log("");
+  verify(TARGET_WORLD);
+  log("");
+  log("done. Paper is up on the flat world.");
+  log("Now start the rest of the stack so Guardian joins it:");
+  log("  node scripts/startStack.js");
+}
+
 async function main() {
   const args = process.argv.slice(2);
   if (args.length === 0) {
-    console.log("usage: node scripts/switchToFlatWorld.js --dry-run|--apply|--gamerules|--verify|--rollback");
+    console.log("usage: node scripts/switchToFlatWorld.js --dry-run|--apply|--gamerules|--verify|--rollback|--cutover");
     process.exit(2);
   }
   const mode = args[0];
-  if (!["--dry-run", "--apply", "--gamerules", "--verify", "--rollback"].includes(mode)) {
+  const MODES = ["--dry-run", "--apply", "--gamerules", "--verify", "--rollback", "--cutover"];
+  if (!MODES.includes(mode)) {
     console.log(`unknown option: ${mode}`);
+    console.log(`valid: ${MODES.join(" ")}`);
     process.exit(2);
   }
 
@@ -293,6 +396,13 @@ async function main() {
       process.exit(1);
     }
     rollback();
+    return;
+  }
+
+  // --cutover manages the Paper lifecycle itself, so it checks the port
+  // directly rather than relying on the snapshot taken above.
+  if (mode === "--cutover") {
+    await cutover();
     return;
   }
 

@@ -11,6 +11,7 @@ const CODE_DEFAULTS = {
   companionRole: "AI companion",
   companionPersonality: "Warm, observant, concise, practical, and grounded in the Minecraft world.",
   llmProvider: "groq",
+  companionPlayers: [],
   minecraft: {
     host: "127.0.0.1",
     port: 25565,
@@ -214,6 +215,24 @@ function applyEnvOverrides(settings, env = process.env) {
   if (env.AGENT_MAX_PENDING_TURNS) {
     overrides.agent = { ...(overrides.agent || settings.agent), maxPendingTurns: parseNumber(env.AGENT_MAX_PENDING_TURNS, settings.agent.maxPendingTurns) };
   }
+  if (env.COMPANION_ROLE) {
+    overrides.companionRole = env.COMPANION_ROLE;
+  }
+  if (env.COMPANION_PERSONALITY) {
+    overrides.companionPersonality = env.COMPANION_PERSONALITY;
+  }
+  if (env.ALLOW_AUTO_GIVE_BUILD_MATERIALS) {
+    overrides.agent = {
+      ...(overrides.agent || settings.agent),
+      allowAutoGiveBuildMaterials: parseBoolean(env.ALLOW_AUTO_GIVE_BUILD_MATERIALS, settings.agent.allowAutoGiveBuildMaterials)
+    };
+  }
+  if (env.COMPANION_PLAYERS) {
+    overrides.companionPlayers = String(env.COMPANION_PLAYERS)
+      .split(",")
+      .map((name) => name.trim())
+      .filter(Boolean);
+  }
 
   return deepMerge(settings, overrides);
 }
@@ -238,7 +257,13 @@ function resolveEffectiveSettings(manifest, requestedProfileId = null, env = pro
   const hasEnvOverrides = env.PRIMARY_PLAYER || env.MC_PRIMARY_PLAYER || env.MC_BOT_USERNAME ||
     env.COMPANION_NAME || env.LLM_PROVIDER || env.MC_HOST || env.MC_PORT || env.MC_AUTH ||
     env.MC_FOLLOW_DISTANCE || env.MC_RESPOND_TO_ALL || env.AGENT_MEMORY_WINDOW ||
-    env.AGENT_EVENT_WINDOW || env.AGENT_MAX_PENDING_TURNS;
+    env.AGENT_EVENT_WINDOW || env.AGENT_MAX_PENDING_TURNS ||
+    // These were readable ONLY by the one-time .env -> manifest migration, never
+    // by applyEnvOverrides. Once the manifest existed it silently shadowed them,
+    // so ALLOW_AUTO_GIVE_BUILD_MATERIALS=true in .env had no effect and every
+    // build died on MISSING_MATERIALS while the operator believed it was enabled.
+    env.COMPANION_ROLE || env.COMPANION_PERSONALITY ||
+    env.ALLOW_AUTO_GIVE_BUILD_MATERIALS || env.COMPANION_PLAYERS;
 
   if (hasEnvOverrides) {
     settings = applyEnvOverrides(settings, env);

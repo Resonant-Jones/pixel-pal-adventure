@@ -120,6 +120,31 @@ function summarizeBlocks(bot, origin, radius = 2, limit = 8) {
     .slice(0, limit);
 }
 
+// Every nearby player, not just the primary one. With a second player in the
+// world, tracking only the primary made the other kid invisible to the model —
+// Guardian could not say where they were or who it was speaking to.
+function summarizeAllPlayers(bot) {
+  if (!bot) {
+    return [];
+  }
+
+  const origin = bot.entity?.position || null;
+  const rows = [];
+
+  for (const [serverName, entry] of Object.entries(bot.players || {})) {
+    const position = entry?.entity?.position || null;
+    if (!position) continue;
+
+    rows.push({
+      name: serverName,
+      distance: origin ? roundNumber(distanceBetween(position, origin)) : null,
+      position: toBlockPosition(position)
+    });
+  }
+
+  return rows.sort((left, right) => (left.distance ?? 0) - (right.distance ?? 0));
+}
+
 function summarizePlayerState(bot, focusPlayer) {
   if (!focusPlayer) {
     return null;
@@ -153,7 +178,8 @@ function captureWorldSnapshot(bot, options = {}) {
     is_raining: Boolean(bot?.isRaining),
     nearby_entities: [],
     nearby_blocks: [],
-    player_state: null
+    player_state: null,
+    players: []
   };
 
   if (!bot?.entity?.position) {
@@ -176,6 +202,7 @@ function captureWorldSnapshot(bot, options = {}) {
   snapshot.nearby_entities = summarizeEntities(bot, bot.entity.position, radius, maxEntities);
   snapshot.nearby_blocks = summarizeBlocks(bot, bot.entity.position, 2, maxBlocks);
   snapshot.player_state = summarizePlayerState(bot, options.focusPlayer);
+  snapshot.players = summarizeAllPlayers(bot);
 
   return snapshot;
 }
@@ -186,5 +213,6 @@ function formatWorldSnapshot(snapshot) {
 
 module.exports = {
   captureWorldSnapshot,
-  formatWorldSnapshot
+  formatWorldSnapshot,
+  summarizeAllPlayers
 };

@@ -127,6 +127,7 @@ function buildRuntimeConfig(effectiveSettings, env = process.env) {
     allowAutoGiveBuildMaterials: effectiveSettings.agent.allowAutoGiveBuildMaterials,
     debugBuildPlans: effectiveSettings.agent.debugBuildPlans,
     respondToAllPlayers: effectiveSettings.minecraft.respondToAllPlayers,
+    companionPlayers: Array.isArray(effectiveSettings.companionPlayers) ? effectiveSettings.companionPlayers : [],
     minecraft: {
       host,
       port,
@@ -271,6 +272,7 @@ async function main() {
     allowAutoGiveBuildMaterials: runtimeConfig.allowAutoGiveBuildMaterials,
     debugBuildPlans: runtimeConfig.debugBuildPlans,
     respondToAllPlayers: runtimeConfig.respondToAllPlayers,
+    companionPlayers: runtimeConfig.companionPlayers,
     llmProvider,
     retryConfig: runtimeConfig.retry,
     reconnectConfig: runtimeConfig.reconnect

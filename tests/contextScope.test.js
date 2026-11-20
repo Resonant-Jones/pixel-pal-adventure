@@ -41,6 +41,45 @@ async function main() {
   assert.doesNotMatch(summaryContext.userPrompt, /PRIVATE_/);
   const unavailable = await buildContext({ ...options, worldId: null });
   assert.deepEqual(unavailable.recentMessages, []);
+
+  // A second player must stay in memory. Filtering every message to the primary
+  // player alone made a friend invisible, which read to the kids as the bot
+  // ignoring whoever was not the "main" player.
+  const friendMessages = [
+    { ...base, speaker: ".Marallren", content: "FRIEND_SAYS_HELLO" },
+    { ...base, speaker: "Guardian", content: "FRIEND_REPLY" }
+  ];
+  const friendContext = await buildContext({
+    ...options,
+    knownPlayers: ["Panda_Nuggetz", ".Marallren"],
+    messageStore: { getRecentMessages: async () => friendMessages }
+  });
+  assert.equal(friendContext.recentMessages.length, 2, "a known player's messages stay in scope");
+  assert.match(friendContext.userPrompt, /FRIEND_SAYS_HELLO/);
+  assert.match(friendContext.userPrompt, /FRIEND_REPLY/);
+
+  // An unknown outsider is still excluded.
+  const outsider = await buildContext({
+    ...options,
+    knownPlayers: ["Panda_Nuggetz", ".Marallren"],
+    messageStore: { getRecentMessages: async () => [{ ...base, speaker: "Stranger", content: "PRIVATE_OUTSIDER" }] }
+  });
+  assert.deepEqual(outsider.recentMessages, [], "players outside the session stay out of memory");
+
+  // A summary owned by a known player is in scope; one owned by nobody is not.
+  const friendSummary = await buildContext({
+    ...options,
+    knownPlayers: ["Panda_Nuggetz", ".Marallren"],
+    eventStore: {
+      getRecentEvents: async () => [],
+      getRecentAdventureSummaries: async () => [
+        { ...base, actor: "Guardian", description: "FRIEND_SUMMARY", metadata: { primaryPlayer: ".Marallren" } }
+      ],
+      getRecentReflexEvents: async () => []
+    }
+  });
+  assert.equal(friendSummary.recentSummaries.length, 1, "a friend's summary is remembered");
+
   console.log("context scope tests passed");
 }
 main().catch((error) => { console.error(error); process.exitCode = 1; });

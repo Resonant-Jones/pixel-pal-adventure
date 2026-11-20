@@ -8,9 +8,44 @@ const {
 const { captureWorldSnapshot } = require("../minecraft/worldSnapshot");
 const { playerNameCandidates } = require("../minecraft/playerIdentity");
 
-function inConversationScope(item, { worldId, threadId, primaryPlayer, storedCompanionName }, actorField) {
+function inConversationScope(item, { worldId, threadId, primaryPlayer, storedCompanionName, knownPlayers }, actorField) {
   if (!worldId || !threadId || item.world_id !== worldId || item.thread_id !== threadId) return false;
-  return item[actorField] === storedCompanionName || playerNameCandidates(primaryPlayer).includes(item[actorField]);
+  if (item[actorField] === storedCompanionName) return true;
+
+  // Previously this kept ONLY the primary player (plus Floodgate aliases), which
+  // silently dropped every other player's messages from memory. The companion
+  // could not recall anything a second player said, which read as being aloof.
+  // Anyone configured as a known companion player now stays in scope.
+  const accepted = new Set(playerNameCandidates(primaryPlayer));
+
+  for (const name of Array.isArray(knownPlayers) ? knownPlayers : []) {
+    if (typeof name === "string" && name.trim()) {
+      for (const candidate of playerNameCandidates(name)) {
+        accepted.add(candidate);
+      }
+    }
+  }
+
+  return accepted.has(item[actorField]);
+}
+
+// Summaries are world-level memories, but they must still name an owner. Widening
+// this to "any known player" fixes summaries recorded while a friend was playing
+// without turning into a leak: a summary owned by someone outside the session, or
+// owned by nobody at all, stays out.
+function inPrimarySummaryScope(item, { worldId, threadId, primaryPlayer, knownPlayers }) {
+  if (!worldId || !threadId || item.world_id !== worldId || item.thread_id !== threadId) return false;
+
+  const accepted = new Set(playerNameCandidates(primaryPlayer));
+  for (const name of Array.isArray(knownPlayers) ? knownPlayers : []) {
+    if (typeof name === "string" && name.trim()) {
+      for (const candidate of playerNameCandidates(name)) {
+        accepted.add(candidate);
+      }
+    }
+  }
+
+  return accepted.has(item.metadata?.primaryPlayer);
 }
 
 async function buildContext({
@@ -20,7 +55,9 @@ async function buildContext({
   threadId,
   worldId,
   latestMessage,
+  speakerName = null,
   primaryPlayer,
+  knownPlayers = [],
   companionName,
   storedCompanionName = companionName,
   role,
@@ -42,11 +79,10 @@ async function buildContext({
     eventStore.getRecentReflexEvents(threadId, 6, { worldId })
   ]);
 
-  const scope = { worldId, threadId, primaryPlayer, storedCompanionName };
+  const scope = { worldId, threadId, primaryPlayer, storedCompanionName, knownPlayers };
   const recentMessages = messages.filter((item) => inConversationScope(item, scope, "speaker"));
   const recentEvents = events.filter((item) => inConversationScope(item, scope, "actor"));
-  const recentSummaries = summaries.filter((item) => inConversationScope(item, scope, "actor") &&
-    playerNameCandidates(primaryPlayer).includes(item.metadata?.primaryPlayer));
+  const recentSummaries = summaries.filter((item) => inPrimarySummaryScope(item, scope));
   const recentReflexEvents = reflexes.filter((item) => inConversationScope(item, scope, "actor"));
   const filteredEvents = recentEvents.filter((event) => event.type !== "adventure_summary");
   const worldSnapshot = captureWorldSnapshot(bot, { focusPlayer: primaryPlayer });
@@ -63,10 +99,12 @@ async function buildContext({
       companionName,
       primaryPlayer,
       role,
-      personality
+      personality,
+      knownPlayers
     }),
     userPrompt: buildUserPrompt({
       latestMessage,
+      speakerName,
       operatorInstruction,
       spatialReferences,
       allowedActions,
@@ -91,6 +129,7 @@ async function buildAdventureSummaryContext({
   companionName,
   storedCompanionName = companionName,
   primaryPlayer,
+  knownPlayers = [],
   summaryWindow = 24,
   summaryEventWindow = 12
 }) {
@@ -99,7 +138,7 @@ async function buildAdventureSummaryContext({
     eventStore.getRecentEvents(threadId, summaryEventWindow, { worldId })
   ]);
 
-  const scope = { worldId, threadId, primaryPlayer, storedCompanionName };
+  const scope = { worldId, threadId, primaryPlayer, storedCompanionName, knownPlayers };
   const recentMessages = messages.filter((item) => inConversationScope(item, scope, "speaker"));
   const filteredEvents = events.filter((item) => item.type !== "adventure_summary" && inConversationScope(item, scope, "actor"));
 

@@ -1,4 +1,4 @@
-const { matchesPlayerName, resolveOnlinePlayerName } = require("../minecraft/playerIdentity");
+const { matchesPlayerName, resolveOnlinePlayerName, playerNameCandidates } = require("../minecraft/playerIdentity");
 const { buildContext, buildAdventureSummaryContext } = require("./contextBuilder");
 const { CommandService } = require("./commandService");
 const { parseBuildRequest } = require("../builder/requestParser");
@@ -151,6 +151,7 @@ class AgentRuntime {
     summaryContextLimit = 3,
     maxPendingTurns = 4,
     respondToAllPlayers = false,
+    companionPlayers = [],
     reflexObservationIntervalMs = 5000,
     reflexWorkerIntervalMs = 1000,
     buildWorkerIntervalMs = 1000,
@@ -189,6 +190,7 @@ class AgentRuntime {
     this.summaryContextLimit = summaryContextLimit;
     this.maxPendingTurns = maxPendingTurns;
     this.respondToAllPlayers = respondToAllPlayers;
+    this.companionPlayers = Array.isArray(companionPlayers) ? companionPlayers : [];
     this.reflexObservationIntervalMs = reflexObservationIntervalMs;
     this.reflexWorkerIntervalMs = reflexWorkerIntervalMs;
     this.buildWorkerIntervalMs = buildWorkerIntervalMs;
@@ -807,6 +809,46 @@ class AgentRuntime {
 
   getIdentityPromptProfile() {
     return buildIdentityPromptProfile(this.runtimeState.identity);
+  }
+
+  // Everyone Guardian may talk to. The primary player is always included; anyone
+  // who is online or configured as a companion player is added alongside them, so
+  // a second player joining the world is not invisible to the prompt or to memory.
+  getKnownPlayers() {
+    const names = new Set();
+
+    if (typeof this.primaryPlayer === "string" && this.primaryPlayer.trim()) {
+      names.add(this.primaryPlayer.trim());
+    }
+
+    for (const name of Array.isArray(this.companionPlayers) ? this.companionPlayers : []) {
+      if (typeof name === "string" && name.trim()) {
+        names.add(name.trim());
+      }
+    }
+
+    for (const name of Object.keys(this.botAdapter?.bot?.players || {})) {
+      if (name && name !== this.botAdapter?.bot?.username) {
+        names.add(name);
+      }
+    }
+
+    return Array.from(names);
+  }
+
+  isKnownPlayer(username) {
+    if (typeof username !== "string" || !username) return false;
+
+    if (this.isPrimaryPlayer(username)) return true;
+
+    const accepted = new Set();
+    for (const name of this.getKnownPlayers()) {
+      for (const candidate of playerNameCandidates(name)) {
+        accepted.add(candidate);
+      }
+    }
+
+    return accepted.has(username);
   }
 
   async applyConfigPatch(patch = {}) {
@@ -1755,7 +1797,7 @@ class AgentRuntime {
     });
 
     this.botAdapter.on("chat", (payload) => {
-      if (this.isPrimaryPlayer(payload.username)) {
+      if (this.isKnownPlayer(payload.username)) {
         this.reflexClassifier.markPrimaryActivity();
       }
 
@@ -1763,7 +1805,7 @@ class AgentRuntime {
     });
 
     this.botAdapter.on("entityMoved", (payload) => {
-      if (this.isPrimaryPlayer(payload.username)) {
+      if (this.isKnownPlayer(payload.username)) {
         this.reflexClassifier.markPrimaryActivity();
       }
     });
@@ -1930,7 +1972,9 @@ class AgentRuntime {
       return false;
     }
 
-    return this.respondToAllPlayers || this.isPrimaryPlayer(payload.username);
+    // Any known player is observed, not just the primary one. Otherwise a second
+    // player's messages never entered the conversation at all.
+    return this.respondToAllPlayers || this.isKnownPlayer(payload.username);
   }
 
   shouldRespond(payload) {
@@ -1942,7 +1986,7 @@ class AgentRuntime {
       return true;
     }
 
-    return this.isPrimaryPlayer(payload.username) || Boolean(payload.directMention);
+    return this.isKnownPlayer(payload.username) || Boolean(payload.directMention);
   }
 
   async getActiveBuildStatus(worldId) {
@@ -2177,7 +2221,9 @@ class AgentRuntime {
   }
 
   getDirectCommand(payload) {
-    if (!this.isPrimaryPlayer(payload?.username)) {
+    // Previously only the primary player could use direct commands, so a friend
+    // saying "follow me" got no reaction at all. Any known player may issue one.
+    if (!this.isKnownPlayer(payload?.username)) {
       return null;
     }
 
@@ -2645,9 +2691,11 @@ class AgentRuntime {
             threadId: this.threadId,
             worldId: worldContext.worldId,
             latestMessage: payload.message,
+            speakerName: payload.username,
             operatorInstruction: null,
             spatialReferences: resolvedAnchor?.anchor ? [formatAnchorSummary(resolvedAnchor.anchor)] : [],
             primaryPlayer: this.primaryPlayer,
+            knownPlayers: this.getKnownPlayers(),
             companionName: identityProfile.displayName,
             storedCompanionName: this.companionName,
             role: identityProfile.role,
