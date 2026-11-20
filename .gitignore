@@ -9,3 +9,7 @@ dashboard/src-tauri/target/
 
 # local Paper server: binaries, world data, logs, credentials
 minecraft-server/
+
+# The SurrealDB CLI writes its shell history into the working directory, so
+# every ad-hoc query landed here and dirtied the tree.
+history.txt
