@@ -195,19 +195,90 @@ Canonical dimension 1024 (MiniMax `embo-01`), a pluggable provider with a
 deterministic offline fallback, and a hybrid retrieval that is useful with the
 fallback alone.
 
-### Chaos building — see Phase 2
+### Chaos building — DONE, live-verified
 
-Phase 2 grows a second kind of build: structures that are *deliberately*
-broken. TNT piles, item stacks, a floating pile that should not stand, redstone
-that leads nowhere, a chest maze with one unreachable chest, a scrap heap.
+Seven new archetypes in `builder/chaosProfiles.js`: `tnt_pile`, `item_pile`,
+`tnt_maze`, `floating_pile`, `redstone_junk`, `chest_maze`, `scrap_heap`.
 
-The son's taste, in his father's words: *"placing too many items in one place
-or many TNT and waiting for the system to crash and explode, not just a big
-boom but weird failures are funny to him."*
+The rule that shapes them: **building TNT is fine, igniting it is a separate
+act.** There is no interaction primitive in the build vocabulary — every
+primitive places or removes a block — so a chaos build cannot light its own
+TNT. The blast comes from the game, which is the whole point of the aesthetic,
+and is the difference between funny and a griefing tool in a shared world. A
+test asserts every primitive a chaos build emits is placement-only.
 
-The rule this imposes: **building TNT is fine, igniting it is a separate
-act.** Guardian places and never lights. The blast comes from the game, which
-is the whole point of the aesthetic.
+Determinism is enforced: every random choice comes from a seeded PRNG, so the
+same request always builds the same structure.
+
+**Proved live on the running stack.** Asking for "a pile of tnt" produced:
+
+```
+summary:    pile of TNT in one place
+materials:  { "tnt": 100 }
+blocks:     100
+footprint:  7 x 7 x 5
+completion: Piled. I did not light it — that's your job.
+```
+
+and the queued job in the database carried `commands: ['/give Guardian tnt 61']`,
+`materials: { tnt: 61 }`, and the chaos primitives — the whole path from a
+kid's phrasing to a block of TNT on the ground.
+
+It did **not** finish placing, and the reason is worth recording:
+
+```
+last_failure: { diagnostic_code: "SURVIVAL_INTERRUPTED",
+                message: "Task interrupted for self-preservation." }
+```
+
+Guardian spawned in a cave with skeletons, the survival controller kept
+claiming the body, and the build was interrupted and resumed and interrupted
+again. The chaos build is correct; the body is busy surviving. That is a
+pre-existing behaviour, and it is exactly what Phase 3 exists to fix — a
+companion that cannot build is not much of a companion, and one that fights
+in the open at night is not much of a friend.
+
+Also fixed here: **"shouldn't" was being read as a hypothetical.** The
+hypothetical-build pattern contains `\bshould\b`, and a contraction ends at a
+word boundary, so *"build something that shouldn't work"* was read as *"maybe
+build something"* and refused. That is the single most likely thing a kid who
+likes broken builds would ask for, and it was being turned away.
+
+### The unprompted half was switched off
+
+`runtimeState.js` defaulted `narrativeReflexEnabled: false`, which suppressed
+**every** reflex with `narrative_reflex_disabled`. The whole reflex pipeline —
+ten triggers, SurrealDB enqueue, cooldowns, presence release — was running and
+being discarded. Guardian only ever spoke when spoken to: a chat window, not a
+companion.
+
+Now enabled, with `highSalienceOnly: false` so the social reflexes count too —
+the idle nudge and the *"we have been here before"* callback. Verified live:
+the first `reflex_triggered` event since 18 March, *"Heads up, hostile mob
+nearby."*
+
+This is the surface Phase 1's generative voice replaces. Until it is replaced
+these are the canned templates, and they are the weakest words Guardian says.
+
+### Semantic memory — NOT DONE
+
+The two delegated attempts (semantic memory, chaos builder) produced no disk
+output in 75 and 60 minutes respectively before being stopped. Delegation is
+not producing here, so the semantic memory work will be implemented directly
+instead.
+
+What it needs to honour, now known precisely:
+
+- **Full-text search and graph traversal are native to SurrealDB and need no
+  provider.** The vector branch is an enhancement, not a prerequisite.
+- Canonical dimension **1024** (MiniMax `embo-01`), HNSW `DIMENSION 1024`,
+  `DIST COSINE`, `TYPE F32`. DISKANN is 3.1+ and we are on 3.0.4.
+- MiniMax `/v1/embeddings` returns 1002 on every attempt and is not a
+  published product on that domain. Ollama is broken on this Mac. So the
+  embedding provider must be pluggable with a deterministic offline fallback,
+  and retrieval must be useful with the fallback alone.
+- Every retrieval stays scoped by thread, world and owner. That is a safety
+  property, not a performance one.
 
 ---
 
