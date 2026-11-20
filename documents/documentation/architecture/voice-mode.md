@@ -51,14 +51,72 @@ bridge. It is the fallback if BVC's client app proves awkward on macOS.
 
 Voice always has **a companion piece of software running next to the game**.
 That is not a workaround; it is the shape of every working Bedrock voice
-product. BVC needs three parts, all mandatory:
+product. BVC needs these parts, all mandatory:
 
-| Part | Where | Who installs it |
+| Part | Where | Who installs it | Verified |
+|---|---|---|---|
+| BVC Paper plugin | `minecraft-server/plugins/` | me — one jar, hash-verified | **staged**, sha256 `c372018c…` |
+| BVC voice server | inside the Paper JVM (embedded mode) | me — no separate service | paper config |
+| A valid TLS certificate | DNS for a domain | **you** — see below | — |
+| BVC client app | the son's iPad | **you** — TestFlight | iOS build is TestFlight-only |
+| BVC client app | this Mac, as Guardian's voice body | me / you | **staged**, sha256 `1761255d…` |
+
+Both artifacts are already downloaded and hash-verified in
+`.local/voice/plugins/`:
+
+```
+bvc-paper-plugin-1.0.0-beta.15.jar    50,752,616 bytes
+bvc-client-macos-arm64.app.zip        20,777,067 bytes
+```
+
+**The plugin version is not a detail — it is a hard constraint.**
+Paper here is **1.21.11**, because mineflayer tops out there (HANDOFF §2.6f).
+BVC's plugin declares an `api-version`, and Paper refuses any plugin newer than
+itself. Reading the `plugin.yml` out of each release:
+
+| Release | api-version | Loads on Paper 1.21.11? |
 |---|---|---|
-| BVC Paper plugin | `minecraft-server/plugins/` | me — one jar, hash-verified |
-| BVC voice server | same machine, embedded in Paper | me — it runs inside the plugin |
-| BVC client app | the son's iPad | **you** — one app from TestFlight |
-| BVC client app | this Mac, as Guardian's voice body | me / you — the companion app |
+| beta.10, beta.13, **beta.15** | `1.21` | **yes** |
+| beta.16 → beta.27 | `26.2` | no — rejected at load |
+
+So **beta.15** is the newest usable build, and beta.27 (the current release)
+would be refused by the server. Upgrading Paper to satisfy the plugin is not an
+option: that breaks mineflayer, and therefore Guardian.
+
+### The TLS requirement — the real cost of this route
+
+> *"Bedrock Voice Chat requires a valid TLS certificate. The client apps check
+> it the same way a browser does. **Self-signed certificates will not work.** The
+> app refuses the connection, and you cannot turn this check off."*
+
+That is the part worth knowing before committing to this route. Three options,
+one only:
+
+1. **An assigned hostname** — BVC gives you a name and renews its own
+   certificate. No domain to buy. Availability is limited to some Patreon and
+   YouTube members, and it is documented as a development feature.
+2. **ACME DNS-01** — you need a domain and a supported DNS provider. Cloudflare
+   (scoped API token, DNS-edit permission on that one zone — *not* the global
+   API key) or acme-dns. **DNS-01 does not need port 80 open**, so the server
+   can stay behind NAT.
+3. **Your own PEM files** — `fullchain.pem` plus the key. Use the full chain: a
+   certificate without the intermediate works on a machine that already cached
+   it and fails on a new phone.
+
+Also required:
+
+- `enforce-secure-profile=false` in `server.properties` if you want in-game chat
+  to sync through the BVC app.
+- The plugin keeps its certificate authority in `plugins/BedrockVoiceChat/`.
+  **Back that directory up** — deleting it invalidates every client certificate
+  the server has issued.
+
+### The macOS client is a direct download
+
+The website lists macOS as TestFlight-only, but the GitHub release carries
+`bvc-client-macos-arm64.app.zip` — a signed `.app` bundle, already staged and
+hash-verified. **No TestFlight needed on this Mac.** The iOS build has no
+release asset, so the son's iPad is the one app that must come from TestFlight.
 
 ---
 
@@ -196,14 +254,31 @@ PCM with no container is rejected by the provider. Max body 12 MB.
 
 | # | Step | Owner | Notes |
 |---|---|---|---|
-| 1 | Install the BVC Paper plugin | me | Hash-verified against the official release, same rule as Geyser. Needs a Paper restart — `scripts/restartPaper.sh`, which is yours to run because the agent cannot signal Paper. |
-| 2 | Enable the BVC server | me | Embedded mode inside the Paper plugin. One port, one config file. |
-| 3 | Install BlackHole | me | `brew install blackhole-2ch`, then wire the device in Audio MIDI Setup. |
-| 4 | Build the companion app | **you** | The contract is §4. It is a small local app: one WebSocket, one HTTP POST, and audio routing. |
-| 5 | Install the BVC client app on the son's iPad | **you** | TestFlight. One app, one pairing step. |
-| 6 | The first spoken conversation | both of you | The acceptance test. It has not happened yet, and nothing above proves it will. |
+| 1 | Install the BVC Paper plugin | me | `bvc-paper-plugin-1.0.0-beta.15.jar` is **staged and hash-verified**. Needs a Paper restart — `scripts/restartPaper.sh`, which is yours to run because the agent cannot signal Paper. |
+| 2 | Write `plugins/BedrockVoiceChat/config.yml` | me | Embedded mode: `use-embedded-server: true` plus the `embedded-config` block. No separate server, no Docker, no extra port. |
+| 3 | **Get a domain and a valid certificate** | **you** | The one genuinely hard requirement. Assigned hostname (no domain, Patreon/YouTube-gated) or a domain with Cloudflare DNS-01. Self-signed is refused outright. |
+| 4 | Install BlackHole | me | `brew install blackhole-2ch`, then wire the device in Audio MIDI Setup. |
+| 5 | Build the companion app | **you** | The contract is §4. It is a small local app: one WebSocket, one HTTP POST, and audio routing. |
+| 6 | Install the BVC client app on the son's iPad | **you** | TestFlight — the iOS build has no release asset. |
+| 7 | The first spoken conversation | both of you | The acceptance test. It has not happened yet, and nothing above proves it will. |
 
-Steps 4 and 5 are the ones that need you. Everything else is mine.
+Steps 3, 5 and 6 need you. Everything else is mine.
+
+### The plan if TLS is the blocker
+
+If a domain and certificate turn out to be a line under the bus, there is a
+fallback that needs neither: **the companion app carries Guardian's voice over
+the LAN to the son's iPad directly**, without BVC at all.
+
+The agent side is already built and does not care how the audio travels. The
+companion app would play Guardian's mp3 into a virtual mic and the iPad would
+receive it through whatever local mechanism you choose. The cost is that it is
+*not* Bedrock-native voice: no proximity, no in-client mute, and the iPad
+usually cannot hear another device's microphone directly, so this route needs
+its own transport and is less likely to feel native to a kid.
+
+That is why BVC is the recommended route despite the certificate: it is the one
+that behaves like a real game feature rather than a side channel.
 
 ---
 
