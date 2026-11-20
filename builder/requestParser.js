@@ -4,6 +4,78 @@ const {
   normalizeStyleName
 } = require("./styleProfiles");
 const { classifyBuildRequest, hasStructureCue } = require("./buildIntent");
+const { PILE_BLOCKS } = require("./chaosProfiles");
+
+// Chaos detection runs FIRST. "build a house of tnt" contains a normal shape
+// cue, and if the normal cue wins the request quietly becomes a cabin — which
+// is the wrong answer to a kid who wanted a tnt pile.
+//
+// Order matters inside this list. The CONTENT noun beats the SHAPE word: "a
+// junk pile" is a heap of junk, not a pile of one item, while "a pile of dirt"
+// is a pile. So the named material is checked before the generic shape.
+function detectChaosStyle(text) {
+  const normalized = String(text || "").toLowerCase();
+
+  if (/\btnt\b[^.]*\bmaze\b|\bmaze\b[^.]*\btnt\b/.test(normalized)) {
+    return "tnt_maze";
+  }
+
+  if (/\bchests?\b[^.]*\bmaze\b|\bmaze\b[^.]*\bchests?\b/.test(normalized)) {
+    return "chest_maze";
+  }
+
+  if (/\bmaze\b|\blabyrinth\b/.test(normalized)) {
+    return "tnt_maze";
+  }
+
+  if (/\bfloating\b/.test(normalized)) {
+    return "floating_pile";
+  }
+
+  if (/\bredstone\b/.test(normalized)) {
+    return "redstone_junk";
+  }
+
+  // Named material before generic shape. The \w* suffix matters: a kid says
+  // "messy" and "piles", not "mess" and "pile".
+  if (/\b(junk|scrap|mess|garbage)\w*\b/.test(normalized)) {
+    return "scrap_heap";
+  }
+
+  if (/\btnt\b/.test(normalized)) {
+    return "tnt_pile";
+  }
+
+  if (/\bchests?\b/.test(normalized)) {
+    return "item_pile";
+  }
+
+  if (/\b(pile|stack|heap)\w*\b/.test(normalized)) {
+    return "item_pile";
+  }
+
+  if (/\b(broken|glitch|weird|chaos|silly|pointless)\w*\b/.test(normalized)) {
+    return "scrap_heap";
+  }
+
+  if (/\b(shouldn't|should not|doesn't work|does not work|not work)\b/.test(normalized)) {
+    return "scrap_heap";
+  }
+
+  return null;
+}
+
+// "a pile of dirt" is dirt, not a pile of whatever. The item travels through
+// the features list because that is the channel the plan already has.
+function detectPileItem(text, style) {
+  if (style !== "item_pile") {
+    return [];
+  }
+
+  const normalized = String(text || "").toLowerCase();
+
+  return PILE_BLOCKS.filter((block) => normalized.includes(block.replace("_block", "")));
+}
 
 function detectStyle(text) {
   if (/\bbridge\b/.test(text)) {
@@ -128,10 +200,11 @@ function parseBuildRequest(message, primaryPlayer = "Sage", resolvedAnchor = nul
     return null;
   }
 
-  const style = normalizeStyleName(detectStyle(text));
+  const chaosStyle = detectChaosStyle(text);
+  const style = chaosStyle || normalizeStyleName(detectStyle(text));
   const palette = normalizePaletteName(detectPalette(text, style === "tower" ? "stone" : style === "camp" ? "spruce" : "oak"));
   const size = normalizeSizeName(detectSize(text, style === "bridge" ? "medium" : "small"));
-  const features = detectFeatures(text, style);
+  const features = [...detectFeatures(text, style), ...detectPileItem(text, style)];
 
   return {
     type: "compose_structure",
@@ -147,5 +220,7 @@ function parseBuildRequest(message, primaryPlayer = "Sage", resolvedAnchor = nul
 }
 
 module.exports = {
+  detectChaosStyle,
+  detectPileItem,
   parseBuildRequest
 };

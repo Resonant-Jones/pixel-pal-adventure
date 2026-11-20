@@ -1,3 +1,5 @@
+const { CHAOS_STYLES } = require("./chaosProfiles");
+
 const SIZE_PRESETS = {
   tiny: { width: 4, depth: 5, wallHeight: 2, towerHeight: 5, bridgeLength: 6 },
   small: { width: 5, depth: 6, wallHeight: 3, towerHeight: 7, bridgeLength: 8 },
@@ -88,7 +90,12 @@ const STYLE_DEFAULTS = {
     palette: "spruce",
     size: "small",
     features: ["campfire", "seats", "lean_to"]
-  }
+  },
+  // Deliberately broken structures. Registered here so normalizeStyleName
+  // accepts them — that function falls back to "cabin" for anything it does
+  // not recognise, and a chaos request that turned into a cabin would be
+  // exactly the wrong answer.
+  ...CHAOS_STYLES
 };
 
 function uniq(values) {
@@ -116,6 +123,38 @@ function normalizeStyleName(style) {
 
   if (normalized === "campfire_camp") {
     return "camp";
+  }
+
+  // Chaos aliases. The request parser normalises the child's phrasing into
+  // these before it gets here, but a direct style string should land in the
+  // right place too.
+  const chaosAliases = {
+    tnt: "tnt_pile",
+    tnt_stack: "tnt_pile",
+    pile_of_tnt: "tnt_pile",
+    tnt_tower: "tnt_pile",
+    item_stack: "item_pile",
+    pile: "item_pile",
+    stack: "item_pile",
+    item_heap: "item_pile",
+    tnt_labyrinth: "tnt_maze",
+    maze: "tnt_maze",
+    floating_heap: "floating_pile",
+    floating_stack: "floating_pile",
+    redstone: "redstone_junk",
+    redstone_mess: "redstone_junk",
+    redstone_pile: "redstone_junk",
+    chest_grid: "chest_maze",
+    chest_labyrinth: "chest_maze",
+    junk: "scrap_heap",
+    junk_pile: "scrap_heap",
+    scrap: "scrap_heap",
+    mess: "scrap_heap",
+    garbage: "scrap_heap"
+  };
+
+  if (chaosAliases[normalized]) {
+    return chaosAliases[normalized];
   }
 
   return STYLE_DEFAULTS[normalized] ? normalized : "cabin";
@@ -188,7 +227,10 @@ function resolveStylePlan(input = {}) {
     paletteName,
     palette: PALETTES[paletteName],
     features,
-    dimensions: SIZE_PRESETS[size]
+    dimensions: SIZE_PRESETS[size],
+    // An explicit seed makes a rebuild reproduce the same structure exactly.
+    // Without one it is derived from the plan, which is still deterministic.
+    seed: input.seed ?? null
   };
 }
 
@@ -196,6 +238,7 @@ module.exports = {
   PALETTES,
   SIZE_PRESETS,
   STYLE_DEFAULTS,
+  CHAOS_STYLES,
   normalizeDirection,
   normalizePaletteName,
   normalizeSizeName,

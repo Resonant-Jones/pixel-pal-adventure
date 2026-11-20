@@ -42,8 +42,14 @@ function createRuntimeState({
       toolPermissions: "standard",
       followDistance: Number(minecraft.followDistance || 2),
       buildMode: "hybrid",
-      narrativeReflexEnabled: false,
-      highSalienceOnly: true,
+      // The unprompted half of a companion. With this off, every reflex was
+      // suppressed with "narrative_reflex_disabled" and Guardian only ever
+      // spoke when spoken to — a chat window, not a friend. Toggle via the
+      // control plane's PATCH /config.
+      narrativeReflexEnabled: true,
+      // false means the social reflexes count too: the idle nudge, and the
+      // "we've been here before" callback. These are the memorable ones.
+      highSalienceOnly: false,
       allowMutationDuringBuild: false,
       // Self-preservation is on by default: a companion that lets itself be
       // eaten is not much of a companion. Toggle via the control plane.

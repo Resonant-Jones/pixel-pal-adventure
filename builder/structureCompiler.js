@@ -1,5 +1,6 @@
 const { countMaterials, expandPrimitives } = require("./primitiveExecutor");
 const { resolveStylePlan } = require("./styleProfiles");
+const { buildChaosPrimitives, isChaosStyle, CHAOS_STYLES } = require("./chaosProfiles");
 
 function describePlan(style, size, paletteName, features) {
   const featureText = features.length ? ` with ${features.join(", ").replace(/_/g, " ")}` : "";
@@ -213,6 +214,13 @@ function buildCampPrimitives(plan) {
 }
 
 function compilePrimitives(plan) {
+  // Chaos structures are a separate family. They are deliberately broken, and
+  // they place blocks and nothing else — there is no interaction primitive in
+  // this vocabulary, so a chaos build cannot light its own TNT.
+  if (isChaosStyle(plan.style)) {
+    return buildChaosPrimitives(plan);
+  }
+
   switch (plan.style) {
     case "tower":
       return buildTowerPrimitives(plan);
@@ -228,6 +236,10 @@ function compilePrimitives(plan) {
 }
 
 function buildCompletionMessage(plan) {
+  if (isChaosStyle(plan.style)) {
+    return CHAOS_STYLES[plan.style]?.completion || "Built. Don't ask me why.";
+  }
+
   switch (plan.style) {
     case "bridge":
       return "The bridge is finished.";
@@ -249,7 +261,9 @@ function compileStructure(input = {}) {
     direction: plan.direction
   });
   const materials = countMaterials(expanded.placements);
-  const summary = describePlan(plan.style, plan.size, plan.paletteName, plan.features);
+  const summary = isChaosStyle(plan.style)
+    ? CHAOS_STYLES[plan.style]?.description || describePlan(plan.style, plan.size, plan.paletteName, plan.features)
+    : describePlan(plan.style, plan.size, plan.paletteName, plan.features);
 
   return {
     ...plan,

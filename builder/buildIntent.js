@@ -9,7 +9,13 @@ const BUILD_VERB_PATTERN = /\b(build|construct|make|create)\b/;
 const NEGATION_PATTERN = /\b(?:don't|do not|never|no|not|without|avoid|stop)\b/;
 const HYPOTHETICAL_PATTERN = /\b(?:maybe|later|someday|eventually|perhaps|could|would|might|should|what if|if we)\b/;
 const ANCHOR_REFERENCE_PATTERN = /\b(?:anchor|this anchor|that anchor|the anchor|marked place|target anchor)\b/;
-const STRUCTURE_CUE_PATTERN = /\b(bridge|tower|camp|hut|cabin|house|home|shelter|base|template|blueprint|prebuilt|quick build)\b/;
+// Chaos structures are a real shape, so they are a real structure cue. Without
+// these, "build a pile of tnt" reads as a build with no recognisable shape and
+// gets refused — which is precisely the request a kid is most likely to make.
+const CHAOS_CUE_PATTERN =
+  /\b(pile|piles|stack|stacks|heap|maze|labyrinth|junk|scrap|mess|garbage|chaos|broken|glitchy|weird|silly|pointless|tnt|redstone|chests?)\b|\b(shouldn't|should not|doesn't work|does not work|not work)\b/;
+const STRUCTURE_CUE_PATTERN =
+  /\b(bridge|tower|camp|hut|cabin|house|home|shelter|base|template|blueprint|prebuilt|quick build)\b/;
 // A child nudging a stalled build says "keep going" or "finish it", not
 // "build me a house". Without this, a resume nudge reads as a fresh build
 // request and queues a duplicate job — the reported "forgot what it was
@@ -102,14 +108,29 @@ function extractTargetReference(text, resolvedAnchor = null) {
 }
 
 function hasStructureCue(text) {
-  return STRUCTURE_CUE_PATTERN.test(normalizeText(text));
+  const normalized = normalizeText(text);
+  return STRUCTURE_CUE_PATTERN.test(normalized) || CHAOS_CUE_PATTERN.test(normalized);
+}
+
+// "shouldn't" is a negation, not a hypothetical.
+//
+// The hypothetical pattern contains \bshould\b, and a contraction ends at a
+// word boundary, so "build something that shouldn't work" was being read as
+// "maybe build something" and refused. That is the single most likely thing a
+// kid who likes broken builds would ask for, and it was being turned away.
+const NEGATED_HYPOTHETICAL_PATTERN =
+  /\b(shouldn't|shouldnt|wouldn't|wouldnt|couldn't|couldnt|mightn't|mightnt)\b/g;
+
+function stripNegatedHypotheticals(text) {
+  return String(text || "").replace(NEGATED_HYPOTHETICAL_PATTERN, " ");
 }
 
 function classifyBuildRequest(message, { resolvedAnchor = null } = {}) {
   const text = normalizeText(message);
   const hasBuildVerb = BUILD_VERB_PATTERN.test(text);
   const hasNegation = hasBuildVerb && NEGATION_PATTERN.test(text);
-  const hasHypothetical = hasBuildVerb && HYPOTHETICAL_PATTERN.test(text);
+  const hasHypothetical =
+    hasBuildVerb && HYPOTHETICAL_PATTERN.test(stripNegatedHypotheticals(text));
   const target = extractTargetReference(text, resolvedAnchor);
   const hasTarget = Boolean(target);
   const boundedStructure = hasStructureCue(text);
@@ -160,6 +181,7 @@ function classifyBuildRequest(message, { resolvedAnchor = null } = {}) {
 }
 
 module.exports = {
+  CHAOS_CUE_PATTERN,
   classifyBuildRequest,
   extractTargetReference,
   hasStructureCue,
