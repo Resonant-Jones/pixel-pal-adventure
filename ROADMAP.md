@@ -17,7 +17,7 @@ into the phases below.
 | 0.3 Action contract | **not started** | Still open. The 11 phantom actions and the silent `default → "none"` remain. |
 | 0.4 Stack up + health receipt | **done** | SurrealDB 8001, Paper 25565, Geyser 19132/udp, control plane 8787 — all listening. `/ready` → `{"ok":true,"ready":true,"authTokenLoaded":true,"projectorReady":true}`. Guardian logged in as entity 23186. |
 
-`npm test` is now **34/34 files**. `npm run check` is clean.
+`npm test` is now **35/35 files**. `npm run check` is clean.
 
 ### The leak, proved and closed
 
@@ -127,6 +127,87 @@ available* — is the unprompted path, and it is the path with a lookup table.
 So the plan is: **make the silent path excellent, give it real memory to draw
 on, and close the trust hole that the live config currently opens.** Everything
 else is plumbing that is already in good shape.
+
+---
+
+## 0.6 Scope expansion — 2026-11-20, second session
+
+Three things were added after the first sign-off, at the owner's direction:
+**voice mode**, **maximising SurrealDB's embeddings and graph**, and
+**building whatever the son asks for, including deliberately broken things.**
+
+### Voice mode — agent side DONE, transport pending
+
+Phase 6 has been pulled forward and largely built. The full architecture, the
+constraint that forced the design, the companion app contract, and the list of
+steps that need a human are in
+**`documents/documentation/architecture/voice-mode.md`**.
+
+Verified live on the running stack:
+
+- MiniMax text-to-speech works. `speech-2.8-turbo`, voice `English_FriendlyPerson`
+  (the id comes from MiniMax's live `GET /v1/get_voice`, not a guess).
+  3.3s–10.5s of 32 kHz mono mp3 per line, valid per `ffprobe`.
+- MiniMax speech-to-text works. A round trip of synthesised speech transcribed
+  back correctly. The docs say STT is **paid-only**; this key is paid.
+- The voice is hooked onto `botAdapter.say()` — the one place every spoken line
+  goes through — so chat replies, reflex messages, build feedback and the
+  greeting are all spoken, and none can be forgotten in a new code path.
+- The control plane carries the companion app's surface: `WS /voice`,
+  `POST /voice/transcribe`, `POST /voice/say`, `GET /voice/spoken`,
+  `GET /voice/audio/:id`. All five verified against the live stack, including
+  the catch-up handshake and the mp3 fetched back over HTTP.
+- A voice failure degrades to "no audio" and never takes the game down. The
+  line was already said in chat by the time the audio is requested.
+- The control-plane token is now a stable UUID in `.env`
+  (`GUARDIAN_CONTROL_TOKEN`). It was random per start, which would have meant
+  reconfiguring the companion app every time Guardian restarted.
+
+**The transport is the part that needs a human.** Bedrock clients cannot use
+Java voice mods — Simple Voice Chat's own FAQ says voice inside Bedrock is
+impossible for that reason, and Geyser emulates a vanilla Java client, so a
+Bedrock player arrives without the mod and hears nobody. The route that works
+with Geyser is **Bedrock Voice Chat**, whose Paper plugin reports every
+player's position — including the mineflayer bot — to a voice server. That is
+what lets Guardian's voice arrive from Guardian's actual position in the world,
+which is the "synchronized in the game" requirement.
+
+Two steps need you: the BVC client app on the son's iPad, and the companion app
+itself (the contract is written; the UI is your work).
+
+### Semantic memory — see Phase 2
+
+Two provider findings changed the design, both verified live:
+
+- **Ollama is broken on this macOS build.** Installed, but crashes with a
+  native ggml backtrace on both `serve` and `pull`. Local embeddings via Ollama
+  are not available on this machine.
+- **MiniMax `/v1/embeddings` exists but is not usable here.** HTTP 200 with
+  `base_resp.status_code 1002 "rate limit exceeded(RPM)"` on every attempt,
+  including after a 70-second cooldown. Their published rate-limits table has
+  **no embeddings row** — only LLM, Video, Image, Speech, Music — so it is not
+  a published product on that domain.
+
+So the design does not lean on embeddings to work. Full-text search and graph
+traversal are native to SurrealDB and need no provider; the vector branch is an
+enhancement that is used only when the provider actually returns a vector.
+Canonical dimension 1024 (MiniMax `embo-01`), a pluggable provider with a
+deterministic offline fallback, and a hybrid retrieval that is useful with the
+fallback alone.
+
+### Chaos building — see Phase 2
+
+Phase 2 grows a second kind of build: structures that are *deliberately*
+broken. TNT piles, item stacks, a floating pile that should not stand, redstone
+that leads nowhere, a chest maze with one unreachable chest, a scrap heap.
+
+The son's taste, in his father's words: *"placing too many items in one place
+or many TNT and waiting for the system to crash and explode, not just a big
+boom but weird failures are funny to him."*
+
+The rule this imposes: **building TNT is fine, igniting it is a separate
+act.** Guardian places and never lights. The blast comes from the game, which
+is the whole point of the aesthetic.
 
 ---
 
@@ -443,10 +524,21 @@ deployment target (second Mac as home server vs supervised here) and implement
 
 **Gate:** seven consecutive nights of accumulated, visible change.
 
-### Phase 6 — Voice (M4)
-Turn-based STT/TTS. Entirely unbuilt, but the protocol path is now bridged via
-Geyser, so the odds are better than they were. **Deliberately last** — a voice
-that speaks canned template lines would be worse than text.
+### Phase 6 — Voice (M4) — **PULLED FORWARD, agent side done**
+
+Turn-based STT/TTS. The agent side is built and verified live — see
+`documents/documentation/architecture/voice-mode.md` for the architecture, the
+companion app contract, and the two steps that need a human.
+
+What remains is the transport and the first real conversation. **A voice that
+speaks canned template lines would be worse than text** — and that is exactly
+why the voice is built on top of Phase 1's generative voice module rather than
+beside it. Guardian's spoken lines come from the same voice that writes its
+chat replies, so a voice that has something to say says it.
+
+The ordering argument for doing voice last was *"a voice that speaks canned
+template lines would be worse than text"* — that still holds, and it is why
+Phase 1 must land before the son hears Guardian's voice for the first time.
 
 ---
 
