@@ -2,6 +2,7 @@ const { compileStructure } = require("../builder/structureCompiler");
 const { normalizeStyleName } = require("../builder/styleProfiles");
 const { findBestLabelMatch } = require("./locationIntent");
 const { anchorBelongsTo } = require("../memory/anchorStore");
+const { TRUST_TIERS, GUEST_ALLOWED_ACTIONS } = require("./trustTier");
 
 function sanitizeChat(text) {
   return String(text || "")
@@ -177,8 +178,19 @@ class ActionExecutor {
     };
   }
 
-  async execute(response) {
-    const action = normalizeAction(response.action, this.primaryPlayer);
+  async execute(response, { trustTier = TRUST_TIERS.APPROVED } = {}) {
+    let action = normalizeAction(response.action, this.primaryPlayer);
+
+    // A guest may talk; a guest may not act.
+    //
+    // Enforced here rather than requested in a prompt. The model was told to
+    // only ever answer "none" or "chat" for a guest, but a rule that exists
+    // only in a prompt is a rule that fails silently, and this is the layer
+    // that decides what actually happens to the world.
+    if (trustTier === TRUST_TIERS.GUEST && !GUEST_ALLOWED_ACTIONS.includes(action.type)) {
+      action = { type: "none" };
+    }
+
     const rawMessage = sanitizeChat(response.message);
     let message = shouldSuppressChatMessage(rawMessage) ? "" : rawMessage;
     const execution = {

@@ -128,6 +128,7 @@ function buildRuntimeConfig(effectiveSettings, env = process.env) {
     debugBuildPlans: effectiveSettings.agent.debugBuildPlans,
     respondToAllPlayers: effectiveSettings.minecraft.respondToAllPlayers,
     companionPlayers: Array.isArray(effectiveSettings.companionPlayers) ? effectiveSettings.companionPlayers : [],
+    guestMode: effectiveSettings.guestMode,
     minecraft: {
       host,
       port,
@@ -273,6 +274,7 @@ async function main() {
     debugBuildPlans: runtimeConfig.debugBuildPlans,
     respondToAllPlayers: runtimeConfig.respondToAllPlayers,
     companionPlayers: runtimeConfig.companionPlayers,
+    guestMode: runtimeConfig.guestMode,
     llmProvider,
     retryConfig: runtimeConfig.retry,
     reconnectConfig: runtimeConfig.reconnect

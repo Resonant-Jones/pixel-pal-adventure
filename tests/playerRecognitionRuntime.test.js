@@ -76,8 +76,34 @@ async function main() {
     assert.equal(adapter.followed.at(-1), "Panda_Nuggetz");
     assert.deepEqual(runtime.reasoned, ["hello there"], "direct commands bypass reasoning");
     assert.equal(adapter.said.filter((text) => text.startsWith("Hi ")).length, 1);
-    assert.equal(runtime.shouldRespond({ username: "Other", message: "hello" }), false, "an unknown player is still not answered");
-    assert.equal(runtime.shouldObserve({ username: "Other", directMention: true }), false, "a mention does not grant access to the child's memory lane");
+    // An unapproved player is now answered in the BOUNDED tier rather than
+    // ignored. They get a warm reply, and nothing else: no child memory lane,
+    // no saved places, no ability to make the companion act. They are neither
+    // trusted nor silenced.
+    assert.equal(runtime.shouldRespond({ username: "Other", message: "hello" }), true,
+      "an unapproved player gets a bounded reply, not the full companion");
+    assert.equal(runtime.resolveSpeakerTrustTier("Other"), "guest");
+    assert.equal(runtime.resolveSpeakerTrustTier("Panda_Nuggetz"), "approved");
+    // A mention still does not make them a known player, so it still cannot
+    // reach the child's memory lane. It only reaches the guest's own scope.
+    assert.equal(runtime.shouldObserve({ username: "Other", directMention: true }), true);
+    assert.equal(runtime.isApprovedPlayer("Other"), false,
+      "a mention does not grant access to the child's memory lane");
+    assert.equal(runtime.getDirectCommand({ username: "Other", message: "follow me" }), null,
+      "a guest still cannot issue direct commands");
+
+    // Presence is not trust.
+    //
+    // On 2026-11-20 the trust list and the "who is online" list were the same
+    // list, so any stranger who connected became trusted on the spot. That is
+    // how an unapproved guest heard "The half-finished cabin was Panda's".
+    runtime.botAdapter.bot.players.StrangerOnline = { entity: { position: new Vec3(5, 64, 0) } };
+    assert.equal(runtime.isApprovedPlayer("StrangerOnline"), false,
+      "being online does not make a player trusted");
+    assert.ok(runtime.getKnownPlayers().includes("StrangerOnline"),
+      "but they are still visible, so Guardian can address them");
+    assert.equal(runtime.resolveSpeakerTrustTier("StrangerOnline"), "guest",
+      "and they stay on the guest tier");
 
     // A second, known player is a full participant: they can use direct commands
     // and their messages stay in the conversation lane. Restricting this to the
@@ -89,7 +115,7 @@ async function main() {
       "an unknown player still cannot");
     assert.equal(runtime.shouldObserve({ username: ".Marallren", message: "hi" }), true);
     assert.ok(runtime.getKnownPlayers().includes(".Marallren"), "the roster names the second player");
-    assert.ok(runtime.isKnownPlayer(".Marallren"), "and resolves their Floodgate spelling");
+    assert.ok(runtime.isApprovedPlayer(".Marallren"), "and resolves their Floodgate spelling");
     // Run one ordinary turn through the actual context -> model -> executor
     // path. The model here is synthetic; this makes no provider API request.
     runtime.currentWorld = { world_id: "synthetic-world" };

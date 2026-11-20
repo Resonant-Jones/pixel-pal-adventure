@@ -12,6 +12,7 @@ const CODE_DEFAULTS = {
   companionPersonality: "Warm, observant, concise, practical, and grounded in the Minecraft world.",
   llmProvider: "groq",
   companionPlayers: [],
+  guestMode: "bounded",
   minecraft: {
     host: "127.0.0.1",
     port: 25565,
@@ -205,6 +206,10 @@ function applyEnvOverrides(settings, env = process.env) {
   }
   if (env.MC_RESPOND_TO_ALL) {
     overrides.minecraft = { ...settings.minecraft, respondToAllPlayers: parseBoolean(env.MC_RESPOND_TO_ALL) };
+  }
+  if (env.GUARDIAN_GUEST_MODE) {
+    const mode = String(env.GUARDIAN_GUEST_MODE).trim().toLowerCase();
+    overrides.guestMode = mode === "ignore" ? "ignore" : "bounded";
   }
   if (env.AGENT_MEMORY_WINDOW) {
     overrides.agent = { ...settings.agent, memoryWindow: parseNumber(env.AGENT_MEMORY_WINDOW, settings.agent.memoryWindow) };

@@ -1,5 +1,11 @@
 const { matchesPlayerName, resolveOnlinePlayerName, playerNameCandidates } = require("../minecraft/playerIdentity");
 const { buildContext, buildAdventureSummaryContext } = require("./contextBuilder");
+const {
+  TRUST_TIERS,
+  resolveTrustTier,
+  guardGuestReply,
+  normalizeGuestMode
+} = require("./trustTier");
 const { CommandService } = require("./commandService");
 const { parseBuildRequest } = require("../builder/requestParser");
 const { ReflexClassifier } = require("../reflex/reflexClassifier");
@@ -152,6 +158,7 @@ class AgentRuntime {
     maxPendingTurns = 4,
     respondToAllPlayers = false,
     companionPlayers = [],
+    guestMode = "bounded",
     reflexObservationIntervalMs = 5000,
     reflexWorkerIntervalMs = 1000,
     buildWorkerIntervalMs = 1000,
@@ -191,6 +198,7 @@ class AgentRuntime {
     this.maxPendingTurns = maxPendingTurns;
     this.respondToAllPlayers = respondToAllPlayers;
     this.companionPlayers = Array.isArray(companionPlayers) ? companionPlayers : [];
+    this.guestMode = normalizeGuestMode(guestMode);
     this.reflexObservationIntervalMs = reflexObservationIntervalMs;
     this.reflexWorkerIntervalMs = reflexWorkerIntervalMs;
     this.buildWorkerIntervalMs = buildWorkerIntervalMs;
@@ -811,10 +819,18 @@ class AgentRuntime {
     return buildIdentityPromptProfile(this.runtimeState.identity);
   }
 
-  // Everyone Guardian may talk to. The primary player is always included; anyone
-  // who is online or configured as a companion player is added alongside them, so
-  // a second player joining the world is not invisible to the prompt or to memory.
-  getKnownPlayers() {
+  // The vetted roster: the primary player plus everyone in COMPANION_PLAYERS.
+  //
+  // This is the TRUST list, and it is deliberately not "whoever is online".
+  //
+  // On 2026-11-20 those two ideas were the same list, so any stranger who
+  // joined the server became a trusted player the moment they connected. That
+  // is how an unapproved guest ended up hearing "The half-finished cabin was
+  // Panda's" — they were trusted, because they were online.
+  //
+  // Presence decides who Guardian can see and address. Trust decides what they
+  // may reach. They are different questions and they have different answers.
+  getApprovedPlayers() {
     const names = new Set();
 
     if (typeof this.primaryPlayer === "string" && this.primaryPlayer.trim()) {
@@ -827,6 +843,18 @@ class AgentRuntime {
       }
     }
 
+    return Array.from(names);
+  }
+
+  // Everyone Guardian can see in the world: the vetted roster plus whoever is
+  // online right now, so a second player joining is not invisible to the
+  // prompt.
+  //
+  // This is a PRESENCE list. It says nothing about trust — see
+  // getApprovedPlayers for that.
+  getKnownPlayers() {
+    const names = new Set(this.getApprovedPlayers());
+
     for (const name of Object.keys(this.botAdapter?.bot?.players || {})) {
       if (name && name !== this.botAdapter?.bot?.username) {
         names.add(name);
@@ -836,19 +864,45 @@ class AgentRuntime {
     return Array.from(names);
   }
 
-  isKnownPlayer(username) {
+  // Is this player on the family's vetted list?
+  isApprovedPlayer(username) {
     if (typeof username !== "string" || !username) return false;
 
     if (this.isPrimaryPlayer(username)) return true;
 
     const accepted = new Set();
-    for (const name of this.getKnownPlayers()) {
+    for (const name of this.getApprovedPlayers()) {
       for (const candidate of playerNameCandidates(name)) {
         accepted.add(candidate);
       }
     }
 
     return accepted.has(username);
+  }
+
+  // Is this player currently talking, in either tier? Used to hold back
+  // autonomous chatter while a conversation is in progress — a guest's
+  // conversation counts, or Guardian would talk over them.
+  isActiveSpeaker(username) {
+    if (typeof username !== "string" || !username.trim()) return false;
+    return this.isApprovedPlayer(username) || this.guestMode !== "ignore";
+  }
+
+  // Who is speaking, and therefore what they are allowed to reach.
+  //
+  // "approved" means the player is on the family's vetted list: the primary
+  // player, or one of COMPANION_PLAYERS. Everyone else is a "guest" and gets
+  // the bounded tier — no family memories, no saved places, no actions beyond
+  // speech, and every exchange logged for the parent to review.
+  resolveSpeakerTrustTier(username) {
+    return resolveTrustTier(username, {
+      primaryPlayer: this.primaryPlayer,
+      knownPlayers: this.getApprovedPlayers()
+    });
+  }
+
+  isApprovedSpeaker(username) {
+    return this.resolveSpeakerTrustTier(username) === TRUST_TIERS.APPROVED;
   }
 
   async applyConfigPatch(patch = {}) {
@@ -1797,7 +1851,7 @@ class AgentRuntime {
     });
 
     this.botAdapter.on("chat", (payload) => {
-      if (this.isKnownPlayer(payload.username)) {
+      if (this.isActiveSpeaker(payload.username)) {
         this.reflexClassifier.markPrimaryActivity();
       }
 
@@ -1805,7 +1859,7 @@ class AgentRuntime {
     });
 
     this.botAdapter.on("entityMoved", (payload) => {
-      if (this.isKnownPlayer(payload.username)) {
+      if (this.isActiveSpeaker(payload.username)) {
         this.reflexClassifier.markPrimaryActivity();
       }
     });
@@ -1974,7 +2028,15 @@ class AgentRuntime {
 
     // Any known player is observed, not just the primary one. Otherwise a second
     // player's messages never entered the conversation at all.
-    return this.respondToAllPlayers || this.isKnownPlayer(payload.username);
+    //
+    // Guests are observed too, even when they are not replied to. The parent
+    // asked for every guest conversation to be reviewable, and a conversation
+    // that was never recorded cannot be reviewed.
+    if (this.respondToAllPlayers) {
+      return true;
+    }
+
+    return this.isApprovedPlayer(payload.username) || this.guestMode !== "ignore";
   }
 
   shouldRespond(payload) {
@@ -1982,11 +2044,17 @@ class AgentRuntime {
       return false;
     }
 
+    if (!this.isApprovedPlayer(payload.username)) {
+      // A guest. "bounded" gets a warm reply with the family's memories
+      // withheld; "ignore" gets silence but is still logged.
+      return this.guestMode === "bounded";
+    }
+
     if (this.respondToAllPlayers) {
       return true;
     }
 
-    return this.isKnownPlayer(payload.username) || Boolean(payload.directMention);
+    return this.isApprovedPlayer(payload.username) || Boolean(payload.directMention);
   }
 
   async getActiveBuildStatus(worldId) {
@@ -2223,7 +2291,7 @@ class AgentRuntime {
   getDirectCommand(payload) {
     // Previously only the primary player could use direct commands, so a friend
     // saying "follow me" got no reaction at all. Any known player may issue one.
-    if (!this.isKnownPlayer(payload?.username)) {
+    if (!this.isApprovedPlayer(payload?.username)) {
       return null;
     }
 
@@ -2408,6 +2476,12 @@ class AgentRuntime {
     });
     let lastFailureSignature = null;
     const identityProfile = this.getIdentityPromptProfile();
+    // Who is speaking, and therefore what they are allowed to reach.
+    //
+    // Resolved once per turn, before any context is built. An unapproved
+    // player gets the guest scope: no family memories, no saved places, no
+    // actions beyond speech.
+    const trustTier = this.resolveSpeakerTrustTier(payload.username);
     const resolvedAnchor = options.anchorId ? await this.resolveAnchorTarget(options.anchorId) : null;
     if (resolvedAnchor?.anchor) {
       this.setRuntimeState({
@@ -2695,7 +2769,8 @@ class AgentRuntime {
             operatorInstruction: null,
             spatialReferences: resolvedAnchor?.anchor ? [formatAnchorSummary(resolvedAnchor.anchor)] : [],
             primaryPlayer: this.primaryPlayer,
-            knownPlayers: this.getKnownPlayers(),
+            knownPlayers: this.getApprovedPlayers(),
+            presentPlayers: this.getKnownPlayers(),
             companionName: identityProfile.displayName,
             storedCompanionName: this.companionName,
             role: identityProfile.role,
@@ -2705,7 +2780,8 @@ class AgentRuntime {
             summaryContextLimit: this.summaryContextLimit,
             retryGuidance: guidance || null,
             feedbackSummary,
-            buildStatus
+            buildStatus,
+            trustTier
           });
         } catch (error) {
           const signature = buildNormalizedFailureSignature({
@@ -2771,13 +2847,65 @@ class AgentRuntime {
         }
 
         try {
-          if (resolvedAnchor?.target && reply?.action && !reply.action.target && !reply.action.location) {
+          if (
+            trustTier !== TRUST_TIERS.GUEST &&
+            resolvedAnchor?.target &&
+            reply?.action &&
+            !reply.action.target &&
+            !reply.action.location
+          ) {
             reply.action.target = resolvedAnchor.target;
             reply.action.location = resolvedAnchor.target;
             reply.action.anchorId = resolvedAnchor.anchor.id;
           }
 
-          execution = await this.actionExecutor.execute(reply);
+          // Defence in depth for guest turns.
+          //
+          // The context scoping above means a guest's turn never receives the
+          // family's memories, so there is nothing to paraphrase. This catches
+          // the case where a name still reaches the reply by some path that
+          // scoping missed. It is a guard, not the fix.
+          if (trustTier === TRUST_TIERS.GUEST && typeof reply?.message === "string") {
+            const guarded = guardGuestReply(reply.message, {
+              primaryPlayer: this.primaryPlayer,
+              knownPlayers: this.getApprovedPlayers()
+            });
+
+            if (guarded.redacted) {
+              reply.message = guarded.message;
+              reply.action = { type: "none" };
+              this.logger.warn?.(
+                `[trust] Guest reply mentioned ${guarded.matchedNames.join(", ")} — replaced.`
+              );
+            }
+          }
+
+          execution = await this.actionExecutor.execute(reply, { trustTier });
+
+          if (trustTier === TRUST_TIERS.GUEST) {
+            // Logged so the parent can review every guest conversation.
+            //
+            // The actor is the guest, NOT the companion. The context scope
+            // accepts events written by the companion unconditionally, so
+            // attributing this to Guardian would drop a stranger's words into
+            // the approved players' conversation history. Attributing it to
+            // the guest keeps it visible to the guest's own turns and invisible
+            // to everyone else's.
+            await this.safeRecordEvent({
+              threadId: this.threadId,
+              type: "guest_message",
+              description: String(payload.message || "").slice(0, 400),
+              actor: payload.username,
+              location: observedSnapshot.position,
+              snapshot: observedSnapshot,
+              metadata: {
+                speaker: payload.username,
+                reply: typeof reply?.message === "string" ? reply.message.slice(0, 400) : null,
+                actionType: execution.actionType,
+                turnId
+              }
+            });
+          }
         } catch (error) {
           const connectionInterrupted = this.runtimeUnavailable || this.connectionInterrupted;
           const retryDomain = connectionInterrupted ? RETRY_DOMAINS.CONNECTION : RETRY_DOMAINS.ACTION;

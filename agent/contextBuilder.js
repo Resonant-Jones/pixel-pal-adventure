@@ -1,12 +1,14 @@
 const {
   DEFAULT_ALLOWED_ACTIONS,
   buildSystemPrompt,
+  buildGuestSystemPrompt,
   buildUserPrompt,
   buildAdventureSummarySystemPrompt,
   buildAdventureSummaryUserPrompt
 } = require("../ai/promptBuilder");
 const { captureWorldSnapshot } = require("../minecraft/worldSnapshot");
 const { playerNameCandidates } = require("../minecraft/playerIdentity");
+const { TRUST_TIERS, GUEST_ALLOWED_ACTIONS } = require("./trustTier");
 
 function inConversationScope(item, { worldId, threadId, primaryPlayer, storedCompanionName, knownPlayers }, actorField) {
   if (!worldId || !threadId || item.world_id !== worldId || item.thread_id !== threadId) return false;
@@ -58,6 +60,7 @@ async function buildContext({
   speakerName = null,
   primaryPlayer,
   knownPlayers = [],
+  presentPlayers = null,
   companionName,
   storedCompanionName = companionName,
   role,
@@ -70,8 +73,29 @@ async function buildContext({
   operatorInstruction = null,
   spatialReferences = [],
   allowedActions = DEFAULT_ALLOWED_ACTIONS,
-  buildStatus = null
+  buildStatus = null,
+  trustTier = TRUST_TIERS.APPROVED
 }) {
+  // A guest turn is scoped to the guest.
+  //
+  // This is the real fix for the leak proved live on 2026-11-20, where an
+  // unapproved player asked "what was I working on last time?" and the
+  // companion answered "The half-finished cabin was Panda's."
+  //
+  // Rather than adding a rule that says "do not mention other players", the
+  // scope itself is narrowed: the guest becomes the primary player for the
+  // purposes of this turn. The existing scope machinery then does the rest —
+  // their conversation history is their own, and the adventure summaries that
+  // reach the prompt are the ones owned by them, which is to say none of the
+  // family's. Nothing to paraphrase, because nothing was sent.
+  const isGuest = trustTier === TRUST_TIERS.GUEST;
+  const scopedPrimaryPlayer = isGuest ? speakerName || primaryPlayer : primaryPlayer;
+  const scopedKnownPlayers = isGuest ? [] : knownPlayers;
+  // Who Guardian can SEE — everyone present in the world. Kept separate from
+  // the trust roster above: presence decides who it can address, trust decides
+  // whose memories it may reach. A guest gets no roster at all.
+  const rosterPlayers = isGuest ? [] : (presentPlayers || knownPlayers);
+
   const [messages, events, summaries, reflexes] = await Promise.all([
     messageStore.getRecentMessages(threadId, memoryWindow, { worldId }),
     eventStore.getRecentEvents(threadId, eventWindow, { worldId }),
@@ -79,14 +103,29 @@ async function buildContext({
     eventStore.getRecentReflexEvents(threadId, 6, { worldId })
   ]);
 
-  const scope = { worldId, threadId, primaryPlayer, storedCompanionName, knownPlayers };
+  const scope = {
+    worldId,
+    threadId,
+    primaryPlayer: scopedPrimaryPlayer,
+    storedCompanionName,
+    knownPlayers: scopedKnownPlayers
+  };
   const recentMessages = messages.filter((item) => inConversationScope(item, scope, "speaker"));
   const recentEvents = events.filter((item) => inConversationScope(item, scope, "actor"));
   const recentSummaries = summaries.filter((item) => inPrimarySummaryScope(item, scope));
   const recentReflexEvents = reflexes.filter((item) => inConversationScope(item, scope, "actor"));
   const filteredEvents = recentEvents.filter((event) => event.type !== "adventure_summary");
-  const worldSnapshot = captureWorldSnapshot(bot, { focusPlayer: primaryPlayer });
+  const worldSnapshot = captureWorldSnapshot(bot, { focusPlayer: scopedPrimaryPlayer });
   const playerState = worldSnapshot.player_state;
+
+  // A guest gets no saved places, no learned guidance, and no build status.
+  // Those are all family state, and a guest's turn has no business with
+  // any of them.
+  const scopedSpatialReferences = isGuest ? [] : spatialReferences;
+  const scopedRetryGuidance = isGuest ? null : retryGuidance;
+  const scopedFeedbackSummary = isGuest ? null : feedbackSummary;
+  const scopedBuildStatus = isGuest ? null : buildStatus;
+  const scopedAllowedActions = isGuest ? GUEST_ALLOWED_ACTIONS : allowedActions;
 
   return {
     recentMessages,
@@ -95,28 +134,30 @@ async function buildContext({
     recentReflexEvents,
     worldSnapshot,
     playerState,
-    systemPrompt: buildSystemPrompt({
-      companionName,
-      primaryPlayer,
-      role,
-      personality,
-      knownPlayers
-    }),
+    systemPrompt: isGuest
+      ? buildGuestSystemPrompt({ companionName })
+      : buildSystemPrompt({
+          companionName,
+          primaryPlayer,
+          role,
+          personality,
+          knownPlayers: rosterPlayers
+        }),
     userPrompt: buildUserPrompt({
       latestMessage,
       speakerName,
       operatorInstruction,
-      spatialReferences,
-      allowedActions,
+      spatialReferences: scopedSpatialReferences,
+      allowedActions: scopedAllowedActions,
       recentMessages,
       recentEvents: filteredEvents,
       recentSummaries,
       recentReflexEvents,
       worldSnapshot,
       playerState,
-      retryGuidance,
-      feedbackSummary,
-      buildStatus
+      retryGuidance: scopedRetryGuidance,
+      feedbackSummary: scopedFeedbackSummary,
+      buildStatus: scopedBuildStatus
     })
   };
 }
