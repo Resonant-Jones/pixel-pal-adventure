@@ -260,7 +260,45 @@ nearby."*
 This is the surface Phase 1's generative voice replaces. Until it is replaced
 these are the canned templates, and they are the weakest words Guardian says.
 
-### Semantic memory — NOT DONE
+### Opening a real rendered client — what works and what doesn't
+
+Established on 2026-11-20, because a visual check that only happens once is
+not a visual check.
+
+**What works.** The Minecraft Launcher opens, signed in as the family's
+Microsoft account, with Java 1.21.11 and Bedrock Edition both installed. The
+Java client boots, generates a world, and renders. The in-game Java username is
+**`Panda_Nuggetz`** — 13 characters, the approved tier, and distinct from the
+bot's `Guardian`, so there is no duplicate-login collision.
+
+**`scripts/launchTestClient.js`** assembles the launch command from what the
+launcher already downloaded — its bundled JRE, the 107 libraries, the extracted
+natives, the assets — and joins with `--quickPlayMultiplayer`, so the client
+goes straight to the server with no menu. It gets as far as the client booting
+and then stalls, because Minecraft 1.21 needs a valid session and the
+launcher's `accessToken` in `launcher_accounts.json` is an empty string — the
+live token lives in the macOS keychain.
+
+**What does not work.** Synthetic input does not activate Minecraft's buttons.
+Hover lands on the right widget — the button highlights — but the press never
+fires, and synthetic keystrokes do not register either. The game's window
+belongs to a separate `java` renderer process, while the button events are
+routed to the launcher's helper process. The MCode app also reclaims focus
+between tool calls, so a desktop-scope click lands on MCode unless the target
+window is activated explicitly first.
+
+**Consequence.** A rendered client standing in the world next to Guardian is one
+small human action away: **Multiplayer → Direct Connection → `127.0.0.1:25565`**.
+Twenty seconds, and it is the exact path the son will use.
+
+Everything verified so far was verified through a protocol-level client
+(`scripts/probeChat.js` — a real mineflayer client on the wire) rather than a
+rendered one: the voice round trip, the trust tier and the closed leak, the
+chaos build plan, and the cross-session memory recall. Those are real
+behaviours of the real runtime; what a rendered client would add is the
+*sight* of them.
+
+---
 
 The two delegated attempts (semantic memory, chaos builder) produced no disk
 output in 75 and 60 minutes respectively before being stopped. Delegation is
