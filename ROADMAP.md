@@ -279,24 +279,46 @@ and then stalls, because Minecraft 1.21 needs a valid session and the
 launcher's `accessToken` in `launcher_accounts.json` is an empty string — the
 live token lives in the macOS keychain.
 
-**What does not work.** Synthetic input does not activate Minecraft's buttons.
-Hover lands on the right widget — the button highlights — but the press never
-fires, and synthetic keystrokes do not register either. The game's window
-belongs to a separate `java` renderer process, while the button events are
-routed to the launcher's helper process. The MCode app also reclaims focus
-between tool calls, so a desktop-scope click lands on MCode unless the target
-window is activated explicitly first.
+**What does not work.** A plain synthetic **click** does not activate
+Minecraft's buttons. Hover lands on the right widget — the button highlights —
+but the press never fires, and synthetic keystrokes are unreliable too.
 
-**Consequence.** A rendered client standing in the world next to Guardian is one
-small human action away: **Multiplayer → Direct Connection → `127.0.0.1:25565`**.
-Twenty seconds, and it is the exact path the son will use.
+**What does work: a drag.** `computer_drag` with a short down → move → up
+inside the button fires it, every time. Minecraft's button handling needs a
+mouse-move between press and release; a synthetic click delivers none, a drag
+delivers one. Keyboard input into the address field works normally once the
+window is activated.
 
-Everything verified so far was verified through a protocol-level client
-(`scripts/probeChat.js` — a real mineflayer client on the wire) rather than a
-rendered one: the voice round trip, the trust tier and the closed leak, the
-chaos build plan, and the cross-session memory recall. Those are real
-behaviours of the real runtime; what a rendered client would add is the
-*sight* of them.
+Two more things that mattered:
+
+- **The game window belongs to a different process than the launcher.** The
+  launcher is pid 5247; the game's window is a separate `java` renderer
+  process. `lsappinfo` does not list it under "Minecraft" — find it by
+  enumerating windows whose title contains "Minecraft 1.21".
+- **MCode reclaims focus between tool calls.** A desktop-scope click lands on
+  MCode unless the target window is activated explicitly first, with
+  `pid` + `window_ref` + `delivery_mode: "foreground"`.
+
+**Outcome: the real Java client is in the family world, talking to Guardian.**
+`Panda_Nuggetz joined the game`, entity 26875, and the in-game chat reads:
+
+```
+<Guardian> Hi Panda_Nuggetz! I'm Guardian. I'll help you build, explore, and
+           stay safe. Ask me anything or just say "welcome hut" ...
+<Guardian> I am already building. Do you want me to pause and change the plan?
+<Guardian> Your TNT pile! But I'm short 61 TNT to finish it — and I'm currently
+           boxed in by creepers down here. Grab some TNT and I'll get building?
+```
+
+That last line is three pieces of live state in one sentence: the build job it
+remembered, the material shortfall from the job's payload, and the creepers
+from the world snapshot. The reflexes were firing unprompted alongside it —
+*"Want to explore the area around us?"* and *"Heads up, hostile mob nearby."*
+
+**Consequence for the family.** The desktop Java client joins in four clicks,
+and the son's iPad joins the same world through Geyser on port 19132. A rendered
+client is now a routine part of the verification loop rather than a
+once-a-quarter event.
 
 ---
 

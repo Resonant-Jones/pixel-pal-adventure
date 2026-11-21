@@ -34,9 +34,13 @@
 // KNOWN LIMIT (verified 2026-11-20): the client boots and then stalls,
 // because Minecraft 1.21 wants a valid session and the launcher's
 // `accessToken` in launcher_accounts.json is an empty string — the live token
-// lives in the macOS keychain. This script is therefore the documented launch
-// path, not yet a headless one. The launcher route still works: Multiplayer →
-// Direct Connection → 127.0.0.1:25565.
+// lives in the macOS keychain.
+//
+// This script is therefore the documented launch path, not yet a headless one.
+// The launcher route works and is what was used for the in-world verification:
+// Multiplayer → Direct Connection → 127.0.0.1:25565. Note that a synthetic
+// click does NOT activate Minecraft's buttons — a short drag inside the button
+// does, because the game needs a mouse-move between press and release.
 
 const fs = require("node:fs");
 const os = require("node:os");
