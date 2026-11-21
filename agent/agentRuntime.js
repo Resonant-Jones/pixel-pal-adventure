@@ -38,6 +38,7 @@ const {
 const { FirstGreet } = require("./firstGreet");
 const { enqueueWelcomeHut } = require("./welcomeHut");
 const { buildVoicePresence, SPEAKER_MEMORY_MS } = require("./voicePresence");
+const { hasAudience: computeAudience } = require("./audience");
 
 function escapeRegex(text) {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -340,6 +341,7 @@ class AgentRuntime {
         highSalienceOnly: Boolean(this.runtimeState.liveConfig.highSalienceOnly)
       }),
       presenceController: this.presenceController,
+      hasAudience: () => this.hasAudience(),
       logger: this.logger
     });
 
@@ -357,6 +359,7 @@ class AgentRuntime {
       allowAutoGiveBuildMaterials: this.allowAutoGiveBuildMaterials,
       debugBuildPlans: this.debugBuildPlans,
       presenceController: this.presenceController,
+      hasAudience: () => this.hasAudience(),
       logger: this.logger
     });
 
@@ -1005,6 +1008,23 @@ class AgentRuntime {
 
     const existing = this.recentSpeakers.get(name);
     this.recentSpeakers.set(name, { at: Date.now(), count: (existing?.count || 0) + 1 });
+  }
+
+  // Is anyone in the world to hear Guardian?
+  //
+  // Guardian's autonomous lines — reflexes, build progress — are addressed to
+  // a player. Saying them into an empty server reads as broken rather than
+  // alive, and it costs a speech-provider call each time. This is the gate
+  // that stops it.
+  //
+  // It does NOT stop Guardian from surviving, building or fleeing. Only the
+  // narration goes quiet.
+  hasAudience() {
+    return computeAudience({
+      roster: Object.keys(this.botAdapter?.bot?.players || {}),
+      guardianName: this.botAdapter?.bot?.username || "Guardian",
+      speakers: this.recentSpeakers
+    });
   }
 
   // Who is speaking, and therefore what they are allowed to reach.

@@ -101,11 +101,22 @@ class ReflexClassifier {
     this.idleThresholdMs = idleThresholdMs;
     this.logger = logger;
     this.lastPrimaryActivityAt = Date.now();
+
+    // Has anyone actually been here?
+    //
+    // "The primary player appears idle" is only a true statement about
+    // somebody who was present and then went quiet. With nobody in the
+    // world it is false, and saying it produced the worst symptom the
+    // companion has: a bot that announces "Want to explore the area around
+    // us?" to an empty server every few minutes, forever.
+    this.primaryEverActive = false;
+
     this.lastSignalSignatures = new Map();
   }
 
   markPrimaryActivity() {
     this.lastPrimaryActivityAt = Date.now();
+    this.primaryEverActive = true;
   }
 
   async scan(reason = "periodic") {
@@ -259,7 +270,7 @@ class ReflexClassifier {
       });
     }
 
-    if (Date.now() - this.lastPrimaryActivityAt >= this.idleThresholdMs) {
+    if (this.primaryEverActive && Date.now() - this.lastPrimaryActivityAt >= this.idleThresholdMs) {
       detections.push({
         type: "player_idle",
         description: "Primary player appears idle",

@@ -429,6 +429,60 @@ the son hearing it.
 
 ---
 
+## 0.8 The empty room — 2026-11-21
+
+### What was reported
+
+> "Guardian just says things randomly even though minecraft isn't playing?
+> its like on a timer"
+
+It was exactly on a timer, and the cause was three separate things that all
+assumed somebody was listening.
+
+### The three causes
+
+**The reflex worker had no audience check.** It had a global cooldown (60s)
+and a per-trigger cooldown (180s), and nothing else. Every reflex —
+"Careful, creeper nearby!", "Heads up, hostile mob nearby.", "I am hurt. We
+should be careful." — is addressed to a player, and all of them were fired
+into an empty server, at the price of a speech-provider call each time.
+
+**"The player appears idle" was a lie.** `reflexIdleThresholdMs` is 90
+seconds, and the detector fired 90 seconds after *startup* — whether or not
+the player had ever been there. The result was "Want to explore the area
+around us?" addressed to nobody, forever, every few minutes. Now the idle
+detector requires that a player has actually been present and then gone
+quiet.
+
+**The build worker announced progress to nobody.** "I'm stuck on this one —
+3 tries with no luck. Want to try a different spot?" is a question to a
+person. The build keeps running — the son asked for it and it should be
+finished when he comes back — but the announcements are now gated.
+
+### The rule
+
+**Guardian never narrates to an empty room.** It still survives, builds,
+flees and fights. It just does not talk when nobody is there.
+
+The audience check needs two sources, because neither is reliable alone:
+
+- the server's player list (mineflayer's tab list) — authoritative for who
+  is connected, but observed to lag or omit a player who is plainly in the
+  world
+- who Guardian has heard speak in the last two minutes — always accurate
+  about someone it is talking to, silent about someone who joined and said
+  nothing
+
+Either one means there is an audience. `agent/audience.js`.
+
+### Verified
+
+`tests/audience.test.js` — the rule, the worker staying quiet with the
+reason recorded as `no_audience`, and the idle detector needing a player who
+was actually there. 38/38 test files pass.
+
+---
+
 ## 1. Audit — verified state
 
 Verified by reading code and tracing call sites on 2026-11-20, plus running

@@ -17,6 +17,7 @@ class ReflexWorker {
     perTriggerCooldownMs = 180000,
     getReflexPolicy = () => ({ enabled: true, highSalienceOnly: false }),
     presenceController = null,
+    hasAudience = () => true,
     logger = console
   }) {
     this.botAdapter = botAdapter;
@@ -30,6 +31,7 @@ class ReflexWorker {
     this.perTriggerCooldownMs = perTriggerCooldownMs;
     this.getReflexPolicy = getReflexPolicy;
     this.presenceController = presenceController;
+    this.hasAudience = hasAudience;
     this.logger = logger;
     this.running = false;
   }
@@ -73,6 +75,25 @@ class ReflexWorker {
         await this.jobStore.completeJob(job.id, {
           suppressed: true,
           reason: "low_salience"
+        });
+        await this.markObserved(job, context.worldId);
+        return true;
+      }
+
+      // Is anyone there to hear this?
+      //
+      // Every reflex is addressed to a player: "Careful, creeper nearby!",
+      // "Want to explore the area around us?", "I am hurt. We should be
+      // careful." Said into an empty world they are not atmosphere, they
+      // are a machine talking to nobody — which reads as broken rather than
+      // alive, and costs a speech-provider call each time.
+      //
+      // Guardian still survives, still builds and still flees. It just does
+      // not narrate to a room with nobody in it.
+      if (!this.hasAudience()) {
+        await this.jobStore.completeJob(job.id, {
+          suppressed: true,
+          reason: "no_audience"
         });
         await this.markObserved(job, context.worldId);
         return true;

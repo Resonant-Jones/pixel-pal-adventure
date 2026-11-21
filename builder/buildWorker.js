@@ -55,6 +55,7 @@ class BuildWorker {
     allowAutoGiveBuildMaterials = false,
     debugBuildPlans = false,
     presenceController = null,
+    hasAudience = () => true,
     maxConsecutiveNoProgressPauses = MAX_CONSECUTIVE_NO_PROGRESS_PAUSES,
     logger = console
   }) {
@@ -68,6 +69,7 @@ class BuildWorker {
     this.allowAutoGiveBuildMaterials = allowAutoGiveBuildMaterials;
     this.debugBuildPlans = debugBuildPlans;
     this.presenceController = presenceController;
+    this.hasAudience = hasAudience;
     this.maxConsecutiveNoProgressPauses = maxConsecutiveNoProgressPauses;
     this.logger = logger;
     this.running = false;
@@ -283,6 +285,15 @@ class BuildWorker {
 
   async safeSay(message) {
     if (!message) {
+      return;
+    }
+
+    // A build keeps going when nobody is watching — the son asked for it,
+    // and it should be finished when he comes back. But its progress
+    // announcements are addressed to him, and announcing progress to an
+    // empty world is the same uncanny thing the reflex worker does.
+    if (!this.hasAudience()) {
+      this.logger.info?.("[build] Suppressed announcement (nobody is here to hear it)");
       return;
     }
 
