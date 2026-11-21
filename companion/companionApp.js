@@ -317,7 +317,13 @@ class CompanionApp extends EventEmitter {
       // Guard against hearing ourselves. On a real transport the two legs are
       // separate devices and this does nothing; on a same-machine acoustic
       // loop it is the difference between a conversation and a stutter.
-      if (this.config.audio.duckOnPlayback) {
+      //
+      // The duck outlives the playback by a tail, because the tail of a line
+      // does not end when the audio does — the built-in microphone hears the
+      // reverberation of Guardian's own voice, and a transcript of that would
+      // be sent to the agent as the player speaking.
+      const ducked = this.config.audio.duckOnPlayback;
+      if (ducked) {
         this.captureSession?.setDucked(true);
       }
 
@@ -327,7 +333,8 @@ class CompanionApp extends EventEmitter {
         sampleRate: this.config.audio.sampleRate
       });
 
-      if (this.config.audio.duckOnPlayback) {
+      if (ducked) {
+        await new Promise((resolve) => setTimeout(resolve, this.config.audio.duckTailMs));
         this.captureSession?.setDucked(false);
       }
 

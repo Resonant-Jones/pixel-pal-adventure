@@ -27,6 +27,30 @@
 // How long someone still counts as "here" after they were last heard.
 const AUDIENCE_WINDOW_MS = 120 * 1000;
 
+// Server-side senders that talk in chat but are not people.
+//
+// Plugins announce themselves in the chat channel exactly the way a player
+// does, so the agent hears them the way it hears anyone else. That is
+// correct for answering — and wrong for a roster that is supposed to say
+// who is in the world. A plugin is never a listener.
+//
+// This is a denylist rather than a rule because there is no rule available:
+// a plugin's chat line is indistinguishable from a player's without asking
+// the server, and the server cannot be asked from inside the game.
+const SERVER_SENDERS = new Set([
+  "viaversion",
+  "viaversionplus",
+  "floodgate",
+  "luckperms",
+  "server",
+  "minecraft",
+  "console"
+]);
+
+function isServerSender(name) {
+  return SERVER_SENDERS.has(String(name || "").trim().toLowerCase());
+}
+
 /**
  * @param {object} options
  * @param {string[]} options.roster        the server's player list, raw
@@ -42,13 +66,25 @@ function hasAudience({
   windowMs = AUDIENCE_WINDOW_MS,
   now = Date.now()
 } = {}) {
-  const others = (roster || []).filter((name) => name && name !== guardianName);
+  const others = (roster || []).filter(
+    (name) => name && name !== guardianName && !isServerSender(name)
+  );
   if (others.length > 0) {
     return true;
   }
 
   const cutoff = now - windowMs;
-  for (const info of speakers?.values?.() || []) {
+  for (const [name, info] of speakers || new Map()) {
+    // A companion is not its own audience.
+    //
+    // This is not a hypothetical. The server echoes the bot's own chat back
+    // to it, so Guardian's own voice came round as evidence that the player
+    // was present — which let it keep talking to an empty room, on a timer,
+    // forever.
+    if (!name || name === guardianName || isServerSender(name)) {
+      continue;
+    }
+
     if (info?.at >= cutoff) {
       return true;
     }
@@ -69,5 +105,7 @@ function audienceState(options = {}) {
 module.exports = {
   hasAudience,
   audienceState,
+  isServerSender,
+  SERVER_SENDERS,
   AUDIENCE_WINDOW_MS
 };

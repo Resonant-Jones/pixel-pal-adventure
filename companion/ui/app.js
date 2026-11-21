@@ -150,6 +150,12 @@ function renderFacts(next) {
     $("fact-nearest").textContent = nearest
       ? `${nearest.name} · ${nearest.inView ? `${nearest.distance ?? "?"} blocks` : "heard recently"}${nearest.approved ? "" : " · guest"}`
       : "nobody online";
+
+    // Who Guardian is talking to. "nobody" is the important word here: it is
+    // the answer when the room is empty, and Guardian is quiet in that case.
+    $("fact-audience").textContent = presence.audience === "present"
+      ? (nearest ? nearest.name : "somebody")
+      : "nobody — the room is empty";
   } else {
     $("fact-guardian").textContent = "unknown";
     $("fact-dimension").textContent = "unknown";

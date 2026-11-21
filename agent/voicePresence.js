@@ -24,35 +24,16 @@
 //
 // Neither is inferred from the other.
 
+// Server-side senders that talk in chat but are not people live in
+// agent/audience.js, because the same rule decides both who is in the world
+// and who is listening to it.
+const { isServerSender } = require("./audience");
+
 // How long the agent remembers having heard a player speak.
 //
 // Long enough to bridge a gap in the server's player list, short enough that
 // someone who left a minute ago is not still reported as being in the world.
 const SPEAKER_MEMORY_MS = 90 * 1000;
-
-// Server-side senders that talk in chat but are not people.
-//
-// Plugins announce themselves in the chat channel exactly the way a player
-// does, so the agent hears them the way it hears anyone else. That is
-// correct for answering — and wrong for a roster that is supposed to say
-// who is in the world. A plugin is never a listener.
-//
-// This is a denylist rather than a rule because there is no rule available:
-// a plugin's chat line is indistinguishable from a player's without asking
-// the server, and the server cannot be asked from inside the game.
-const SERVER_SENDERS = new Set([
-  "viaversion",
-  "viaversionplus",
-  "floodgate",
-  "luckperms",
-  "server",
-  "minecraft",
-  "console"
-]);
-
-function isServerSender(name) {
-  return SERVER_SENDERS.has(String(name || "").trim().toLowerCase());
-}
 
 function recentSpeakerNames(speakers, windowMs = SPEAKER_MEMORY_MS, now = Date.now()) {
   const cutoff = now - windowMs;
@@ -129,6 +110,5 @@ module.exports = {
   buildVoicePresence,
   recentSpeakerNames,
   isServerSender,
-  SERVER_SENDERS,
   SPEAKER_MEMORY_MS
 };

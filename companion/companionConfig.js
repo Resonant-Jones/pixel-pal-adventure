@@ -75,6 +75,17 @@ function getCompanionConfig(env = process.env, options = {}) {
       // the local test path — but it must exist, or the local test path lies.
       duckOnPlayback: readBool(env.COMPANION_AUDIO_DUCK, true),
 
+      // How long to keep listening-blind after Guardian stops speaking.
+      //
+      // The tail of a line does not end when the audio ends. On the local
+      // test path Guardian's voice comes out of the speakers and the built-in
+      // microphone hears the reverberation of it, which would be transcribed
+      // and sent back as if the player had said it — and then Guardian would
+      // answer its own voice, which is the loop this whole guard exists to
+      // stop. On the real transport the two legs are different devices and
+      // this does nothing.
+      duckTailMs: readInt(env.COMPANION_AUDIO_DUCK_TAIL_MS, 1500),
+
       sampleRate: readInt(env.COMPANION_AUDIO_SAMPLE_RATE, DEFAULT_SAMPLE_RATE),
       channels: 1,
 

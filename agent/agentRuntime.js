@@ -38,7 +38,7 @@ const {
 const { FirstGreet } = require("./firstGreet");
 const { enqueueWelcomeHut } = require("./welcomeHut");
 const { buildVoicePresence, SPEAKER_MEMORY_MS } = require("./voicePresence");
-const { hasAudience: computeAudience } = require("./audience");
+const { hasAudience: computeAudience, isServerSender } = require("./audience");
 
 function escapeRegex(text) {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -993,7 +993,35 @@ class AgentRuntime {
       isApproved: (name) => this.isApprovedPlayer(name)
     });
 
-    return { ...presence, primaryPlayer: this.primaryPlayer ?? null };
+    return {
+      ...presence,
+      // Who Guardian is talking to, if anyone. A parent should be able to
+      // see at a glance that it is not talking to an empty room.
+      audience: this.hasAudience() ? "present" : "no_audience",
+      primaryPlayer: this.primaryPlayer ?? null
+    };
+  }
+
+  // Is this chat sender a person?
+  //
+  // Not Guardian itself, and not a plugin announcing itself in the chat
+  // channel. The first one is a companion talking to itself; the second one
+  // is a server component. Neither is a listener.
+  isRealPlayerChatSender(username) {
+    const name = String(username || "").trim();
+    if (!name) {
+      return false;
+    }
+
+    if (name === this.companionName) {
+      return false;
+    }
+
+    if (this.botAdapter?.bot?.username && name === this.botAdapter.bot.username) {
+      return false;
+    }
+
+    return !isServerSender(name);
   }
 
   // Remember that this player spoke, and when.
@@ -1002,7 +1030,7 @@ class AgentRuntime {
   // not to answer: a guest who is ignored is still a person in the world.
   #noteSpeaker(username) {
     const name = String(username || "").trim();
-    if (!name) {
+    if (!name || !this.isRealPlayerChatSender(name)) {
       return;
     }
 
@@ -1990,6 +2018,19 @@ class AgentRuntime {
     });
 
     this.botAdapter.on("chat", (payload) => {
+      // Only a real player is a person.
+      //
+      // The server echoes the bot's own chat back to it, and plugins
+      // announce themselves in the chat channel exactly the way a player
+      // does. Both used to arrive here and both were treated as somebody
+      // being present — Guardian's own voice came round as evidence that a
+      // player was listening, which let it keep talking to an empty room on
+      // a timer, forever. It also made Guardian answer the ViaVersion
+      // plugin's notice.
+      if (!this.isRealPlayerChatSender(payload?.username)) {
+        return;
+      }
+
       if (this.isActiveSpeaker(payload.username)) {
         this.reflexClassifier.markPrimaryActivity();
       }

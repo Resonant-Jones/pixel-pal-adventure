@@ -70,6 +70,46 @@ async function testAudienceRule() {
     true
   );
 
+  // A companion is not its own audience.
+  //
+  // This is not a hypothetical. The server echoes the bot's own chat back to
+  // it, so Guardian's own voice came round as evidence that a player was
+  // present — which let it keep talking to an empty room, on a timer,
+  // forever.
+  assert.equal(
+    hasAudience({
+      roster: ["Guardian"],
+      guardianName: "Guardian",
+      speakers: new Map([["Guardian", { at: now - 1000 }]]),
+      now
+    }),
+    false,
+    "Guardian hearing itself is not evidence that anybody is listening"
+  );
+
+  // A plugin announcing itself in chat is not a listener either.
+  assert.equal(
+    hasAudience({
+      roster: ["Guardian"],
+      guardianName: "Guardian",
+      speakers: new Map([["ViaVersion", { at: now - 1000 }]]),
+      now
+    }),
+    false,
+    "a plugin is not an audience"
+  );
+
+  assert.equal(
+    hasAudience({
+      roster: ["Guardian", "ViaVersion"],
+      guardianName: "Guardian",
+      speakers: new Map(),
+      now
+    }),
+    false,
+    "a plugin on the player list is not an audience"
+  );
+
   console.log("  ✓ an audience is somebody connected, or somebody just heard");
 }
 
