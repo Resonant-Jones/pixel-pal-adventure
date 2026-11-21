@@ -958,6 +958,41 @@ class AgentRuntime {
     return this.voiceService?.listSpoken?.(limit) || [];
   }
 
+  // Where everyone is standing, right now.
+  //
+  // Voice has a spatial component: the point of a proximity voice system is
+  // that Guardian's voice arrives from where Guardian is, not from nowhere.
+  // A companion app that places the voice needs Guardian's coordinates and
+  // the distance to each player, and it needs them fresh — a position ten
+  // seconds stale is the difference between "right behind you" and "somewhere
+  // over there".
+  //
+  // The trust tier rides along with each player because the companion app
+  // shows a parent who is talking, and a guest is not the same thing as the
+  // son.
+  getVoicePresence() {
+    const snapshot = this.botAdapter?.getSnapshot?.() || null;
+
+    const players = (snapshot?.players || []).map((player) => ({
+      name: player.name,
+      distance: player.distance ?? null,
+      position: player.position ?? null,
+      approved: this.isApprovedPlayer(player.name)
+    }));
+
+    return {
+      at: new Date().toISOString(),
+      dimension: snapshot?.dimension ?? null,
+      guardian: {
+        name: this.botAdapter?.bot?.username || "Guardian",
+        position: snapshot?.position ?? null,
+        health: snapshot?.health ?? null
+      },
+      players,
+      primaryPlayer: this.primaryPlayer ?? null
+    };
+  }
+
   // Who is speaking, and therefore what they are allowed to reach.
   //
   // "approved" means the player is on the family's vetted list: the primary

@@ -196,6 +196,16 @@ class LocalControlServer {
       return;
     }
 
+    // Where everyone is standing. The companion app polls this so the voice
+    // it places is placed where Guardian actually is.
+    if (request.method === "GET" && requestUrl.pathname === "/voice/presence") {
+      json(response, 200, {
+        ok: true,
+        ...(this.runtime?.getVoicePresence?.() || {})
+      });
+      return;
+    }
+
     if (request.method === "POST" && requestUrl.pathname === "/voice/say") {
       const body = await readJsonBody(request);
       const result = await this.runtime.speakLine(body.text || "", {
@@ -210,10 +220,28 @@ class LocalControlServer {
       const filename = requestUrl.searchParams.get("filename") || "capture.wav";
       const speaker = requestUrl.searchParams.get("speaker") || null;
 
+      // feed=0 transcribes without handing the line to the agent.
+      //
+      // The companion app needs this to check that the audio it is about to
+      // put on the wire actually carries the words Guardian said. Feeding that
+      // same audio to the agent would make Guardian answer its own voice,
+      // which is a conversation with itself and not a test of anything.
+      const feed = requestUrl.searchParams.get("feed") !== "0";
+
       const transcribed = await this.voiceService.transcribe(audio, { filename, speaker });
 
       if (!transcribed.ok) {
         json(response, 400, { ok: false, error: transcribed.error || transcribed.skipped });
+        return;
+      }
+
+      if (!feed) {
+        json(response, 200, {
+          ok: true,
+          transcript: transcribed.text,
+          speaker: transcribed.speaker,
+          fed: false
+        });
         return;
       }
 

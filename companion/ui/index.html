@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Guardian · Voice Link</title>
+    <link rel="stylesheet" href="/ui/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="mark" aria-hidden="true"></span>
+        <div>
+          <h1>Guardian</h1>
+          <p class="sub">Voice Link</p>
+        </div>
+      </div>
+
+      <div class="pills" id="pills" role="status" aria-live="polite">
+        <span class="pill" data-pill="agent"><i></i><span>agent</span></span>
+        <span class="pill" data-pill="voice"><i></i><span>voice</span></span>
+        <span class="pill" data-pill="audio"><i></i><span>audio</span></span>
+        <span class="pill" data-pill="capture"><i></i><span>listening</span></span>
+      </div>
+    </header>
+
+    <main class="grid">
+      <!-- ---------------------------------------------------------------- -->
+      <section class="panel link" aria-labelledby="link-title">
+        <h2 id="link-title">The link</h2>
+
+        <div class="block">
+          <h3>Agent</h3>
+          <dl class="facts">
+            <div><dt>control plane</dt><dd id="fact-agent">—</dd></div>
+            <div><dt>voice enabled</dt><dd id="fact-voice">—</dd></div>
+            <div><dt>lines spoken</dt><dd id="fact-spoken">—</dd></div>
+          </dl>
+        </div>
+
+        <div class="block">
+          <h3>Audio route</h3>
+          <dl class="facts">
+            <div><dt>player speaks via</dt><dd id="fact-input">—</dd></div>
+            <div><dt>guardian speaks via</dt><dd id="fact-output">—</dd></div>
+            <div><dt>microphone</dt><dd id="fact-permission">—</dd></div>
+          </dl>
+          <div class="meter" title="input level">
+            <div class="meter-fill" id="level-fill"></div>
+            <span class="meter-label" id="level-label">—</span>
+          </div>
+        </div>
+
+        <div class="block">
+          <h3>Where everyone is</h3>
+          <dl class="facts">
+            <div><dt>guardian</dt><dd id="fact-guardian">—</dd></div>
+            <div><dt>world</dt><dd id="fact-dimension">—</dd></div>
+            <div><dt>nearest player</dt><dd id="fact-nearest">—</dd></div>
+          </dl>
+        </div>
+      </section>
+
+      <!-- ---------------------------------------------------------------- -->
+      <section class="panel conversation" aria-labelledby="conv-title">
+        <div class="panel-head">
+          <h2 id="conv-title">Conversation</h2>
+          <span class="hint" id="conv-hint">voice and chat, together</span>
+        </div>
+
+        <ol class="transcript" id="transcript" aria-live="polite"></ol>
+
+        <p class="empty" id="transcript-empty">
+          Nothing yet. Say something to Guardian on the right, or let it speak first.
+        </p>
+      </section>
+
+      <!-- ---------------------------------------------------------------- -->
+      <section class="panel console" aria-labelledby="console-title">
+        <h2 id="console-title">Console</h2>
+
+        <div class="block">
+          <label class="field">
+            <span>Say something to Guardian</span>
+            <textarea id="say-text" rows="2" placeholder="Ask it something…"></textarea>
+          </label>
+          <button class="btn primary" id="btn-say">Make Guardian say it</button>
+        </div>
+
+        <div class="block">
+          <label class="field">
+            <span>Speak as the player</span>
+            <textarea id="player-text" rows="2" placeholder="What the player says out loud…"></textarea>
+          </label>
+          <button class="btn" id="btn-player">Say it into the link</button>
+          <p class="note">
+            Synthesised in a player's voice and pushed through the same capture
+            path a microphone would trigger.
+          </p>
+        </div>
+
+        <div class="block">
+          <h3>Voice check</h3>
+          <button class="btn" id="btn-verify">Run the check</button>
+          <ol class="stages" id="stages"></ol>
+        </div>
+      </section>
+
+      <!-- ---------------------------------------------------------------- -->
+      <section class="panel log" aria-labelledby="log-title">
+        <div class="panel-head">
+          <h2 id="log-title">Log</h2>
+          <span class="hint">what the app is doing</span>
+        </div>
+        <ol class="events" id="events"></ol>
+      </section>
+    </main>
+
+    <script src="/ui/app.js"></script>
+  </body>
+</html>
