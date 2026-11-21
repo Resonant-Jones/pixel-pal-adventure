@@ -475,11 +475,52 @@ The audience check needs two sources, because neither is reliable alone:
 
 Either one means there is an audience. `agent/audience.js`.
 
-### Verified
+### The part that was not obvious
+
+The first fix was **not enough**, and finding out why is the useful part.
+
+With the audience check in place the jobs table showed the first few reflex
+jobs still *not* suppressed, and the ones after them suppressed. The
+audience check looked at the player list and at who had been heard
+recently, and neither was telling the truth — because **the server echoes
+the bot's own chat back to it**.
+
+So Guardian said "Heads up, hostile mob nearby", the server sent the line
+back, the agent heard its own voice and recorded it as evidence that a
+player was present and talking — and that authorised the next autonomous
+line. A companion listening to itself, indefinitely, on a cooldown.
+*"Its like on a timer" was exactly the symptom.*
+
+Two self-reference traps, both now closed:
+
+- **Guardian's own echo** is no longer a player being present, and no
+  longer player activity either.
+- **Plugin chat** announces itself exactly the way a player does. The
+  ViaVersion plugin's startup notice was being counted as a guest who had
+  just spoken, and Guardian was answering the notice — a known open issue
+  that fell out of the same fix.
+
+The audio path has the same shape of bug. Guardian's voice comes out of the
+speakers and the built-in microphone hears the reverberation, so the duck
+that protects the companion app from hearing itself now **outlives the
+playback by a tail**. The tail of a line does not end when the audio ends.
+On the real transport the two legs are different devices and this does
+nothing.
+
+### Verified live, not inferred
+
+- **Empty world, three and a half minutes:** not one line. Every reflex job
+  recorded `{"reason":"no_audience","suppressed":true}`.
+- **Player joins:** Guardian greets, answers, and narrates — the reflex jobs
+  record `{"suppressed":false}`.
+- **Player leaves:** silent again.
+
+The console now says who Guardian is talking to, so a parent can see at a
+glance that it is not talking to an empty room.
 
 `tests/audience.test.js` — the rule, the worker staying quiet with the
-reason recorded as `no_audience`, and the idle detector needing a player who
-was actually there. 38/38 test files pass.
+reason recorded, the idle detector needing a player who was actually there,
+and Guardian not counting as its own audience. 38/38 test files pass.
 
 ---
 
