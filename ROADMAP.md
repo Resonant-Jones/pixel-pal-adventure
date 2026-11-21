@@ -524,6 +524,77 @@ and Guardian not counting as its own audience. 38/38 test files pass.
 
 ---
 
+## 0.9 The wrong microphone — 2026-11-21
+
+### What was reported
+
+> "My iPhone keeps activating as a 'Microphone' for AxisNode even though
+> AxisNode has a Built in Microphone since its a laptop."
+
+Two separate things turned out to be tangled together.
+
+### The macOS half — the user's to flip
+
+macOS will switch an input device to a nearby iPhone, and the iPhone's
+microphone then becomes a legitimate input for anything that asks for one.
+That is correct behaviour for the operating system. It lives in **System
+Settings → Sound → Input → "Automatically switch to the iPhone
+microphone"** (Sonoma and later: "Allow apps to automatically switch to the
+iPhone microphone"), and it is not exposed as a writable `defaults` key —
+it is owned by the Continuity capture subsystem, not by a preference anyone
+can read. So that one is a human click.
+
+### The part that was ours — and it was worse than the complaint
+
+The voice link was configured with `COMPANION_AUDIO_INPUT=0` and was
+listening to **"ScoutNode Microphone"** — a virtual device belonging to
+something else on the machine — while the configuration said "index 0" and
+the operator believed it was on the laptop's own microphone.
+
+**Audio device lists are not stable.** They reorder whenever something
+connects or disconnects: an iPhone waking up nearby, AirPods pairing, a USB
+mic being unplugged, a virtual node appearing. ScoutNode vanished from the
+list during the same session and the AirPods moved with it. A device pinned
+by index silently becomes a *different* device with no error and no
+warning.
+
+Devices are now chosen by **name**. Both ffmpeg sides accept one —
+avfoundation for capture, audiotoolbox for playback — so the name goes
+straight through and the device cannot move:
+
+```
+COMPANION_AUDIO_INPUT="MacBook Air Microphone"
+COMPANION_AUDIO_OUTPUT="MacBook Air Speakers"
+```
+
+An **iPhone or iPad is refused outright** (`COMPANION_AUDIO_BLOCKED`,
+default `iphone,ipad`). It belongs to the son, and on macOS a Continuity
+input can carry the machine's own audio back in — a loop, not a microphone.
+The refusal is logged rather than silent.
+
+The app watches the device list (`COMPANION_AUDIO_POLL_MS`, default 5s) and
+re-resolves by name. If the configured device disappears, capture stops and
+says so; it does not fall back to whatever took its place.
+
+`node scripts/startCompanion.js --check` now reports the resolution rather
+than the configuration:
+
+```
+voice in:      MacBook Air Microphone (index 0)
+voice out:     MacBook Air Speakers
+blocked:       iphone, ipad
+```
+
+### The lesson
+
+It is the trust-tier lesson arriving from a different direction. A thing
+being **present** is not the same as it being **the one you meant**. Index
+0 was present, and it was not the microphone.
+
+38/38 test files pass.
+
+---
+
 ## 1. Audit — verified state
 
 Verified by reading code and tracing call sites on 2026-11-20, plus running
