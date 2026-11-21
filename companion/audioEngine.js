@@ -480,16 +480,24 @@ class AudioEngine {
   /**
    * Start capturing from a device.
    *
+   * The device may be given as a name or an index. **A name is strongly
+   * preferred**: the device list reorders whenever something connects or
+   * disconnects — an iPhone waking up, AirPods pairing, a USB mic being
+   * unplugged — and a pinned index then silently becomes a different
+   * microphone without anything failing.
+   *
    * Returns a CaptureSession that emits "pcm" chunks. Microphone permission
    * failures surface as an error event with the OS message rather than as a
    * silent stream of nothing, which is the failure that costs an evening.
    */
-  startCapture({ deviceIndex, sampleRate = DEFAULT_SAMPLE_RATE } = {}) {
+  startCapture({ deviceIndex = 0, deviceName = null, sampleRate = DEFAULT_SAMPLE_RATE } = {}) {
+    const target = deviceName ? `:${deviceName}` : `:${deviceIndex}`;
+
     const child = spawn(this.ffmpegPath, [
       "-hide_banner",
       "-loglevel", "error",
       "-f", "avfoundation",
-      "-i", `:${deviceIndex}`,
+      "-i", target,
       "-f", "s16le",
       "-acodec", "pcm_s16le",
       "-ar", String(sampleRate),
@@ -497,7 +505,7 @@ class AudioEngine {
       "pipe:1"
     ]);
 
-    const session = new CaptureSession({ child, source: "device", label: `device:${deviceIndex}` });
+    const session = new CaptureSession({ child, source: "device", label: target });
     this.sessions.add(session);
 
     session.on("end", () => this.sessions.delete(session));

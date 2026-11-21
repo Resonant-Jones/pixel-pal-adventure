@@ -63,6 +63,22 @@ function getCompanionConfig(env = process.env, options = {}) {
       // Where the player's voice comes from.
       inputDevice: readDevice(env.COMPANION_AUDIO_INPUT),
 
+      // Devices that must never be used as a capture device.
+      //
+      // An iPhone or iPad is not a microphone for this system. It belongs to
+      // the son, and on macOS a Continuity input can also carry the machine's
+      // own audio straight back in — which is a loop, not a microphone.
+      //
+      // The list is matched loosely against the device name, so "Resonant
+      // Jones's iPhone" is caught as well as "iPhone".
+      blockedInputs: readList(env.COMPANION_AUDIO_BLOCKED, ["iphone", "ipad"]),
+
+      // How often to check whether the configured device is still the one we
+      // are actually using. The device list reorders whenever something
+      // connects or disconnects, and a pinned index would silently become a
+      // different microphone.
+      devicePollMs: readInt(env.COMPANION_AUDIO_POLL_MS, 5000),
+
       // There is deliberately no separate "play out loud" switch. The output
       // device IS the transport: on the real setup it is a virtual device the
       // voice client reads, and on the local test path it is the speakers.
@@ -136,6 +152,16 @@ function readInt(value, fallback) {
 function readNumber(value, fallback) {
   const parsed = Number.parseFloat(String(value ?? ""));
   return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function readList(value, fallback = []) {
+  const raw = String(value ?? "").trim();
+  if (!raw) return fallback;
+
+  return raw
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
 }
 
 // A device is either an index into the avfoundation list or a name to match.

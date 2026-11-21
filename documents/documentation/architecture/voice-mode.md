@@ -271,6 +271,54 @@ index past the end of the audiotoolbox list falls back to the default output
 device rather than failing, so a probe proves "a device opens", not "this is
 the device you asked for".
 
+### Which microphone, and which speakers
+
+**Devices are chosen by name, never by index.**
+
+Audio device lists are not stable. They reorder whenever something connects or
+disconnects — an iPhone waking up nearby, AirPods pairing, a USB microphone
+being unplugged, a virtual node appearing. A device pinned by index therefore
+silently becomes a *different* device without anything failing.
+
+That was not theoretical. The link was configured with `COMPANION_AUDIO_INPUT=0`
+and spent its life listening to **"ScoutNode Microphone"**, a virtual device
+belonging to something else on the machine, while the configuration said
+"index 0" and the operator believed it was on the laptop's own microphone.
+The device list reordered during the same session, which is how it was
+noticed.
+
+Both ffmpeg sides accept a device name:
+
+```
+capture:  ffmpeg -f avfoundation -i ":MacBook Air Microphone" ...
+playback: ffmpeg -f s16le -i pipe:0 -f audiotoolbox "MacBook Air Speakers"
+```
+
+So:
+
+```
+COMPANION_AUDIO_INPUT="MacBook Air Microphone"
+COMPANION_AUDIO_OUTPUT="MacBook Air Speakers"
+```
+
+**An iPhone or iPad is refused outright** (`COMPANION_AUDIO_BLOCKED`,
+default `iphone,ipad`). It belongs to the son, and on macOS a Continuity
+input can carry the machine's own audio back in — which is a loop, not a
+microphone. The refusal is logged, not silent.
+
+The app also **watches the device list** (`COMPANION_AUDIO_POLL_MS`, default
+5s) and re-resolves by name. If the configured device disappears, capture
+stops and says so; it does not fall back to whatever took its place.
+
+`node scripts/startCompanion.js --check` prints the devices and the
+resolution:
+
+```
+voice in:      MacBook Air Microphone (index 0)
+voice out:     MacBook Air Speakers
+blocked:       iphone, ipad
+```
+
 ### The duck guard
 
 A same-machine acoustic loop — Guardian's voice out of the speakers, the

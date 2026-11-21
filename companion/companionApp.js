@@ -40,6 +40,11 @@ const { WebSocket } = require("ws");
 
 const { getCompanionConfig } = require("./companionConfig");
 const { AudioEngine, VoiceActivityDetector, pcmToWav } = require("./audioEngine");
+const {
+  resolveInputDevice,
+  resolveOutputDevice,
+  isBlockedInput
+} = require("./deviceResolver");
 
 const MAX_TRANSCRIPT_ENTRIES = 60;
 const MAX_LOG_ENTRIES = 120;
@@ -141,6 +146,7 @@ class CompanionApp extends EventEmitter {
     this.#connectControlPlane();
     this.#startPresencePolling();
     await this.#startCapture();
+    this.#startDeviceWatcher();
 
     await this.#startHttpServer();
 
@@ -161,11 +167,15 @@ class CompanionApp extends EventEmitter {
       this.presenceTimer = null;
     }
 
+    if (this.deviceWatcherTimer) {
+      clearInterval(this.deviceWatcherTimer);
+      this.deviceWatcherTimer = null;
+    }
+
     this.socket?.close();
     this.socket = null;
 
-    this.captureSession?.stop();
-    this.captureSession = null;
+    this.#stopCapture();
 
     this.audio.stopAll();
 
@@ -469,10 +479,10 @@ class CompanionApp extends EventEmitter {
       this.state.audio.lastError = `device discovery failed: ${error?.message || error}`;
     }
 
-    const input = this.#resolveDevice(this.config.audio.inputDevice, this.state.audio.inputDevices);
+    const input = this.#resolveInputDevice(this.config.audio.inputDevice, this.state.audio.inputDevices);
     this.state.audio.inputDevice = input;
 
-    const output = this.#resolveDevice(this.config.audio.outputDevice, null);
+    const output = resolveOutputDevice(this.config.audio.outputDevice).device;
     this.state.audio.outputDevice = output;
 
     if (output && output.index === null) {
@@ -488,37 +498,101 @@ class CompanionApp extends EventEmitter {
     );
   }
 
-  #resolveDevice(device, devices) {
-    if (!device) return null;
+  // Resolve the configured capture device to a concrete one.
+  //
+  // A device is identified by NAME, never by position. The list reorders
+  // whenever something connects or disconnects — an iPhone waking up, AirPods
+  // pairing, a USB mic being unplugged — and a pinned index then silently
+  // becomes a different microphone without anything failing. That is how the
+  // voice link ended up listening to a virtual node's mic instead of the
+  // laptop's own.
+  //
+  // Some devices are refused outright. An iPhone or iPad is not a microphone
+  // for this system: it belongs to the son, and on macOS a Continuity input
+  // can also carry the machine's own audio back in, which is a loop rather
+  // than a microphone.
+  #resolveInputDevice(device, devices) {
+    const resolved = resolveInputDevice(device, devices, {
+      blockedInputs: this.config.audio.blockedInputs
+    });
 
-    if (device.index !== null && device.index !== undefined) {
-      const match = (devices || []).find((candidate) => candidate.index === device.index);
-      return { index: device.index, name: match?.name || null };
+    if (!resolved.ok && resolved.reason === "blocked") {
+      this.#log("error", `Refusing "${resolved.wanted}" as an input device — it is on the blocked list.`);
     }
 
-    const match = (devices || []).find(
-      (candidate) => candidate.name && candidate.name.toLowerCase() === device.name.toLowerCase()
-    );
+    return resolved.device;
+  }
 
-    if (match) {
-      return { index: match.index, name: match.name };
+  #isBlockedInput(name) {
+    return isBlockedInput(name, this.config.audio.blockedInputs);
+  }
+
+  // Watch for the device list changing underneath us.
+  //
+  // The point is not to notice that the list changed. The point is that the
+  // app must never end up listening to a device nobody chose: an iPhone
+  // waking up must not become the voice link's microphone.
+  async #watchForDeviceChanges() {
+    let devices;
+    try {
+      devices = await this.audio.listInputDevices();
+    } catch {
+      return;
     }
 
-    return { index: null, name: device.name };
+    this.state.audio.inputDevices = devices;
+
+    const resolved = this.#resolveInputDevice(this.config.audio.inputDevice, devices);
+    const current = this.state.audio.inputDevice;
+
+    const resolvedName = resolved?.name || null;
+    const currentName = current?.name || null;
+
+    if (resolvedName === currentName) {
+      this.emit("state", this.getState());
+      return;
+    }
+
+    if (!resolved) {
+      this.#log(
+        "warn",
+        `The configured input device is gone${currentName ? ` ("${currentName}")` : ""} — capture stopped`
+      );
+      this.#stopCapture();
+      this.state.audio.inputDevice = null;
+      this.state.audio.capturing = false;
+      this.emit("state", this.getState());
+      return;
+    }
+
+    this.#log("info", `Input device changed: "${currentName || "none"}" → "${resolvedName}" — reopening`);
+    this.#stopCapture();
+    this.#startCapture();
+    this.emit("state", this.getState());
+  }
+
+  #stopCapture() {
+    this.captureSession?.stop();
+    this.captureSession = null;
+    this.vad.reset();
   }
 
   async #startCapture() {
-    const input = this.state.audio.inputDevice;
+    const input = this.#resolveInputDevice(this.config.audio.inputDevice, this.state.audio.inputDevices);
+    this.state.audio.inputDevice = input;
 
-    if (!input || input.index === null) {
+    if (!input) {
       this.state.audio.capturing = false;
       this.state.audio.permission = "no_device";
-      this.#log("warn", "No input device configured — the app is not listening");
+      this.#log("warn", "No usable input device — the app is not listening");
       return;
     }
 
     const session = this.audio.startCapture({
       deviceIndex: input.index,
+      // Open by name when we know it. The name is immune to the device list
+      // being reordered between resolving it and opening it.
+      deviceName: input.name,
       sampleRate: this.config.audio.sampleRate
     });
 
@@ -548,6 +622,16 @@ class CompanionApp extends EventEmitter {
     this.state.audio.capturing = true;
     this.state.audio.permission = "granted";
     this.#log("ok", `Listening on ${input.name || `device ${input.index}`}`);
+  }
+
+  #startDeviceWatcher() {
+    if (this.deviceWatcherTimer) {
+      return;
+    }
+
+    this.deviceWatcherTimer = setInterval(() => {
+      void this.#watchForDeviceChanges();
+    }, this.config.audio.devicePollMs);
   }
 
   /**

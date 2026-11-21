@@ -75,6 +75,8 @@ async function main() {
   const app = new CompanionApp({ config, playerTts });
 
   if (args.check) {
+    const { resolveInputDevice, resolveOutputDevice } = require("../companion/deviceResolver");
+
     const devices = await app.audio.listInputDevices();
     const outputs = await app.audio.probeOutputDevices();
 
@@ -86,11 +88,18 @@ async function main() {
     for (const device of outputs) {
       console.log(`  [${device.index}] writable`);
     }
+
+    const input = resolveInputDevice(config.audio.inputDevice, devices, {
+      blockedInputs: config.audio.blockedInputs
+    });
+    const output = resolveOutputDevice(config.audio.outputDevice);
+
     console.log("");
     console.log(`control plane: ${config.controlPlane.baseUrl}`);
     console.log(`ui:            http://${config.listen.host}:${config.listen.port}`);
-    console.log(`voice out:     ${config.audio.outputDevice ? describe(config.audio.outputDevice) : "not configured"}`);
-    console.log(`voice in:      ${config.audio.inputDevice ? describe(config.audio.inputDevice) : "not configured"}`);
+    console.log(`voice in:      ${describe(input)}`);
+    console.log(`voice out:     ${describe(output)}`);
+    console.log(`blocked:       ${config.audio.blockedInputs.join(", ") || "(nothing)"}`);
 
     await app.audio.stopAll();
     return;
@@ -107,11 +116,20 @@ async function main() {
   process.on("SIGTERM", shutdown);
 }
 
-function describe(device) {
-  if (device.index !== null && device.index !== undefined) {
-    return device.name ? `${device.name} (index ${device.index})` : `index ${device.index}`;
+function describe(resolved) {
+  if (!resolved?.ok) {
+    const why = resolved?.reason === "blocked"
+      ? "refused — it is on the blocked list"
+      : resolved?.reason === "not_present"
+        ? `not available (wanted "${resolved.wanted}")`
+        : "not configured";
+    return why;
   }
-  return device.name;
+
+  const device = resolved.device;
+  return device.name
+    ? `${device.name}${device.index === null ? "" : ` (index ${device.index})`}`
+    : `device ${device.index}`;
 }
 
 main().catch((error) => {

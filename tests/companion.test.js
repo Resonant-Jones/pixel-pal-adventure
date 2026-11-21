@@ -703,12 +703,83 @@ async function testSimulatorUsesItsOwnDetector() {
   console.log("  ✓ the microphone and the test path keep separate detectors");
 }
 
+// ------------------------------------------------------ which microphone
+
+async function testDeviceResolution() {
+  const { resolveInputDevice, resolveOutputDevice, isBlockedInput } = require("../companion/deviceResolver");
+
+  // The list as it is right now on this machine.
+  const devices = [
+    { index: 0, name: "ScoutNode Microphone" },
+    { index: 1, name: "MacBook Air Microphone" },
+    { index: 2, name: "Resonant Jones’s AirPods Pro" }
+  ];
+
+  // A named device keeps its identity when the list is reordered.
+  const before = resolveInputDevice({ index: null, name: "MacBook Air Microphone" }, devices);
+  assert.equal(before.ok, true);
+  assert.equal(before.device.name, "MacBook Air Microphone");
+  assert.equal(before.device.index, 1);
+
+  // The list reorders: the MacBook's microphone is now first, because the
+  // virtual node that was ahead of it went away.
+  const reordered = [
+    { index: 0, name: "MacBook Air Microphone" },
+    { index: 1, name: "ScoutNode Microphone" },
+    { index: 2, name: "Resonant Jones’s AirPods Pro" }
+  ];
+  const after = resolveInputDevice({ index: null, name: "MacBook Air Microphone" }, reordered);
+  assert.equal(after.ok, true);
+  assert.equal(after.device.name, "MacBook Air Microphone", "the name must survive a reorder");
+  assert.equal(after.device.index, 0, "the index moves, the name does not");
+
+  // A named device that is not there must NOT silently fall back to an
+  // index. Falling back is how the app ends up on the wrong microphone.
+  const absent = resolveInputDevice({ index: null, name: "Built-in Microphone" }, devices);
+  assert.equal(absent.ok, false);
+  assert.equal(absent.reason, "not_present");
+  assert.equal(absent.device, null);
+
+  // An iPhone is never a microphone for this system.
+  const phone = resolveInputDevice(
+    { index: null, name: "Resonant Jones’s iPhone" },
+    [...devices, { index: 3, name: "Resonant Jones’s iPhone" }]
+  );
+  assert.equal(phone.ok, false, "an iPhone must be refused");
+  assert.equal(phone.reason, "blocked");
+
+  // And an index that happens to land on one is refused too.
+  const byIndex = resolveInputDevice({ index: 3, name: null }, [
+    ...devices,
+    { index: 3, name: "iPad" }
+  ]);
+  assert.equal(byIndex.ok, false, "an index landing on a phone must be refused");
+  assert.equal(byIndex.reason, "blocked");
+
+  // The blocking is a loose match, so a renamed or detailed device name is
+  // still caught.
+  assert.equal(isBlockedInput("Resonant Jones’s iPhone"), true);
+  assert.equal(isBlockedInput("Kris's iPad Pro"), true);
+  assert.equal(isBlockedInput("MacBook Air Microphone"), false);
+  assert.equal(isBlockedInput("ScoutNode Microphone"), false);
+
+  // The playback side cannot list its devices, so a named output is passed
+  // straight through by name.
+  const output = resolveOutputDevice({ index: null, name: "MacBook Air Speakers" });
+  assert.equal(output.ok, true);
+  assert.equal(output.device.name, "MacBook Air Speakers");
+  assert.equal(output.device.index, null);
+
+  console.log("  ✓ devices are chosen by name, and a phone is never one of them");
+}
+
 // ------------------------------------------------------------------ run
 
 async function main() {
   console.log("companion app");
 
   await testConfig();
+  await testDeviceResolution();
   await testVoiceActivity();
   await testWavHeader();
   await testVoiceMatching();
