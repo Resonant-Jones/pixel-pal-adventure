@@ -9,10 +9,16 @@
 //   node scripts/voiceSay.js "hey, want to build something weird?"
 //   node scripts/voiceSay.js "hey" --voice English_energetic_young_man
 //   node scripts/voiceSay.js "hey" --speed 1.2 --out .local/voice/try.mp3
+//   node scripts/voiceSay.js --list
 //
 // Prints where the file went and how long it is. No provider call happens if
 // VOICE_ENABLED is not true — this script sets it for itself, because
 // auditioning a voice is the whole point of running it.
+//
+// --list prints the voice ids MiniMax actually serves for this account.
+// That matters more than it looks: an id that does not exist fails with
+// provider error 2054 "voice id not exist", which reads like a network
+// fault and is not one.
 
 require("dotenv").config({ path: require("path").join(__dirname, "..", ".env") });
 
@@ -21,7 +27,7 @@ const path = require("node:path");
 const { MiniMaxTtsClient } = require("../voice/ttsClient");
 
 function parseArgs(argv) {
-  const args = { text: null, voice: null, speed: null, out: null };
+  const args = { text: null, voice: null, speed: null, out: null, list: false };
 
   for (let i = 0; i < argv.length; i += 1) {
     const flag = argv[i];
@@ -36,6 +42,8 @@ function parseArgs(argv) {
     } else if (flag === "--out") {
       args.out = value;
       i += 1;
+    } else if (flag === "--list") {
+      args.list = true;
     } else if (!args.text) {
       args.text = flag;
     }
@@ -44,11 +52,54 @@ function parseArgs(argv) {
   return args;
 }
 
+// Print the live voice catalogue for this account.
+//
+// This matters more than it looks: an id that does not exist fails with
+// provider error 2054 "voice id not exist", which reads like a network fault
+// and is not one.
+async function listVoices() {
+  const baseUrl = process.env.MINIMAX_BASE_URL || "https://api.minimax.io/v1";
+  const apiKey = process.env.MINIMAX_API_KEY;
+
+  if (!apiKey) {
+    console.error("MINIMAX_API_KEY is not set.");
+    process.exit(1);
+  }
+
+  const response = await fetch(`${baseUrl}/get_voice`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ voice_type: "all" })
+  });
+
+  const payload = await response.json();
+  const voices = payload?.system_voice || [];
+
+  console.log(`${voices.length} system voices\n`);
+
+  for (const voice of voices) {
+    const description = Array.isArray(voice.description) ? voice.description[0] : voice.description;
+    console.log(`${voice.voice_id.padEnd(38)} ${voice.voice_name || ""}`);
+    if (description) {
+      console.log(`${" ".repeat(38)} ${description}`);
+    }
+  }
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
 
+  if (args.list) {
+    await listVoices();
+    return;
+  }
+
   if (!args.text) {
     console.error('usage: node scripts/voiceSay.js "<text>" [--voice <id>] [--speed <n>] [--out <path>]');
+    console.error('       node scripts/voiceSay.js --list');
     process.exit(2);
   }
 

@@ -63,10 +63,11 @@ function getCompanionConfig(env = process.env, options = {}) {
       // Where the player's voice comes from.
       inputDevice: readDevice(env.COMPANION_AUDIO_INPUT),
 
-      // Play Guardian's voice out loud as well as to the transport. Off by
-      // default: once the transport works the son hears it, and a second copy
-      // on the desk is just noise.
-      speakToSpeakers: readBool(env.COMPANION_AUDIO_SPEAKERS, false),
+      // There is deliberately no separate "play out loud" switch. The output
+      // device IS the transport: on the real setup it is a virtual device the
+      // voice client reads, and on the local test path it is the speakers.
+      // One device, one meaning, no way to accidentally play the same line
+      // twice.
 
       // Drop inbound audio while Guardian is speaking. Without this, a
       // same-machine acoustic loop turns Guardian into a stutter that talks to
@@ -91,8 +92,13 @@ function getCompanionConfig(env = process.env, options = {}) {
     // The app can speak *as* the player to exercise the inbound path without
     // a human in the loop. That is a test affordance, so it is a separate
     // voice from Guardian's.
+    //
+    // The id must be one MiniMax actually serves: an unknown id fails with
+    // provider error 2054 "voice id not exist", which looks like a network
+    // problem and is not one. `node scripts/voiceSay.js --list` prints the
+    // live list.
     playerVoice: {
-      voiceId: env.COMPANION_PLAYER_VOICE || "English_energetic_young_man",
+      voiceId: env.COMPANION_PLAYER_VOICE || "English_Strong-WilledBoy",
       speed: readNumber(env.COMPANION_PLAYER_VOICE_SPEED, 1)
     },
 

@@ -88,6 +88,21 @@ class CompanionApp extends EventEmitter {
       maxUtteranceMs: config.audio.maxUtteranceMs
     });
 
+    // A second detector for the simulated-player path.
+    //
+    // Sharing one detector between the microphone and the test path means
+    // the microphone's room noise is interleaved with the test phrase, and
+    // the test phrase's frames are interleaved with the microphone's. The
+    // result is a detector that cannot tell which speech it is looking at.
+    // Two detectors, two streams, no interference.
+    this.simulatorVad = new VoiceActivityDetector({
+      sampleRate: config.audio.sampleRate,
+      channels: config.audio.channels,
+      thresholdDb: config.audio.vadThresholdDb,
+      hangoverMs: config.audio.vadHangoverMs,
+      maxUtteranceMs: config.audio.maxUtteranceMs
+    });
+
     this.state = {
       startedAt: new Date().toISOString(),
       controlPlane: { connected: false, lastError: null, lastMessageAt: null },
@@ -307,7 +322,8 @@ class CompanionApp extends EventEmitter {
       }
 
       const result = await this.audio.playPcm(pcm, {
-        deviceIndex: output.index,
+        deviceIndex: output.index ?? 0,
+        deviceName: output.index === null || output.index === undefined ? output.name : null,
         sampleRate: this.config.audio.sampleRate
       });
 
@@ -378,21 +394,42 @@ class CompanionApp extends EventEmitter {
   }
 
   async controlPostAudio(pathname, buffer) {
-    const response = await this.fetch(`${this.config.controlPlane.baseUrl}${pathname}`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${this.config.controlPlane.token}`,
-        "Content-Type": "audio/wav"
-      },
-      body: buffer
-    });
+    // The speech provider rate-limits, and a transcription burst can trip it.
+    // That is a temporary condition, so it is retried rather than surfaced
+    // as a failed utterance — the alternative is a voice that stops working
+    // because someone talked twice in a row.
+    const attempts = 3;
+    let lastError = null;
 
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      throw new Error(payload?.error || `HTTP ${response.status}`);
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      const response = await this.fetch(`${this.config.controlPlane.baseUrl}${pathname}`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${this.config.controlPlane.token}`,
+          "Content-Type": "audio/wav"
+        },
+        body: buffer
+      });
+
+      const payload = await response.json().catch(() => ({}));
+
+      if (response.ok) {
+        return payload;
+      }
+
+      lastError = payload?.error || `HTTP ${response.status}`;
+
+      const rateLimited = response.status === 429 || /429|rate limit|conn limit/i.test(lastError);
+      if (!rateLimited || attempt === attempts) {
+        throw new Error(lastError);
+      }
+
+      const waitMs = 2000 * attempt;
+      this.#log("warn", `Transcription rate limited — retrying in ${waitMs / 1000}s`);
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
     }
 
-    return payload;
+    throw new Error(lastError || "transcription failed");
   }
 
   // -------------------------------------------------------------------------
@@ -525,10 +562,20 @@ class CompanionApp extends EventEmitter {
 
     if (result.ended && result.utterance) {
       this.#log("info", "Player stopped speaking — transcribing");
+      // A floating promise that rejects would take the whole app down. It
+      // must not: the app runs beside the game, and a provider rate limit is
+      // a degraded voice, not a crashed machine.
       void this.#transcribeUtterance(result.utterance);
     }
   }
 
+  /**
+   * Transcribe a captured phrase and hand it to the agent.
+   *
+   * Never throws. A provider failure is a result, not an exception: the
+   * caller is often a floating promise, and an unhandled rejection kills the
+   * process. The app has to outlive every provider error it will ever meet.
+   */
   async #transcribeUtterance(pcm, { speaker = null } = {}) {
     const wav = pcmToWav(pcm, {
       sampleRate: this.config.audio.sampleRate,
@@ -553,11 +600,14 @@ class CompanionApp extends EventEmitter {
       this.#log("ok", `Heard: "${truncate(result.transcript, 60)}"`);
       this.emit("state", this.getState());
 
-      return result;
+      return { ok: true, ...result };
     } catch (error) {
-      this.#log("error", `Transcription failed: ${error?.message || error}`);
+      const message = error?.message || String(error);
+      this.state.audio.lastError = message;
+      this.#log("error", `Transcription failed: ${message}`);
       this.emit("state", this.getState());
-      throw error;
+
+      return { ok: false, error: message };
     }
   }
 
@@ -610,12 +660,15 @@ class CompanionApp extends EventEmitter {
 
     this.#log("info", `Simulating the player saying: "${truncate(line, 48)}"`);
 
-    // Run it through the detector exactly as a microphone would.
-    const before = this.vad.active;
-    this.vad.reset();
-    const result = this.vad.push(pcm);
+    // Run it through the detector exactly as a microphone would, on its own
+    // detector so the room noise cannot get in the way.
+    this.simulatorVad.reset();
+    const result = this.simulatorVad.push(pcm);
 
-    let utterance = result.utterance;
+    // The clip has a known end, so do not wait for a hangover that may never
+    // come: close whatever is open.
+    let utterance = result.utterance || this.simulatorVad.flush();
+
     if (!utterance) {
       // The detector did not fire — the phrase was too quiet or too short for
       // the threshold. Send it anyway rather than pretending the path ran.
@@ -623,7 +676,6 @@ class CompanionApp extends EventEmitter {
       this.#log("warn", "Voice activity did not trigger — sending the phrase directly");
     }
 
-    void before;
     this.emit("state", this.getState());
 
     return this.#transcribeUtterance(utterance, { speaker: who });
@@ -745,7 +797,11 @@ class CompanionApp extends EventEmitter {
       let playerHeard = null;
       try {
         const result = await this.simulatePlayer(playerLine, { speaker: who });
-        playerHeard = result?.transcript || "";
+        if (!result?.ok) {
+          record("player speech reaches the agent", false, result?.error || "the phrase was not transcribed");
+          return this.#finishVerification();
+        }
+        playerHeard = result.transcript || "";
       } catch (error) {
         record("player speech reaches the agent", false, error?.message || String(error));
         return this.#finishVerification();
@@ -784,7 +840,7 @@ class CompanionApp extends EventEmitter {
         "player is in the same world",
         Boolean(nearest),
         nearest
-          ? `${nearest.name} is ${nearest.distance} blocks away${nearest.approved ? " (approved)" : " (guest)"}`
+          ? `${nearest.name} · ${nearest.inView ? `${nearest.distance} blocks away` : "heard recently, out of view"}${nearest.approved ? " (approved)" : " (guest)"}`
           : "no player is online"
       );
 

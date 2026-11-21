@@ -183,7 +183,7 @@ h3 {
   grid-template-columns: minmax(240px, 300px) minmax(360px, 1fr) minmax(280px, 340px);
   grid-template-areas:
     "link conversation console"
-    "log  conversation console";
+    "log log log";
   grid-template-rows: minmax(0, 1fr) auto;
   gap: 18px;
   padding: 20px 28px 28px;
@@ -217,7 +217,7 @@ h3 {
 
 .log {
   grid-area: log;
-  max-height: 210px;
+  max-height: 190px;
 }
 
 @media (max-width: 1180px) {

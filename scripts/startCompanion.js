@@ -20,6 +20,24 @@
 
 require("dotenv").config({ path: require("path").join(__dirname, "..", ".env") });
 
+// The app runs beside the game. It must not be the thing that takes the
+// machine down.
+//
+// This is not theoretical. A speech-provider rate limit returned an HTTP 429
+// from the control plane, the floating promise that was waiting on it
+// rejected, and Node's default for an unhandled rejection is to throw —
+// which killed the app mid-conversation. The fix below is the belt to the
+// braces that are already in the code: every awaited path handles its own
+// failures, and these two handlers make sure anything that slips through
+// loses a log line instead of the process.
+process.on("unhandledRejection", (reason) => {
+  console.error("[companion] unhandled rejection (kept running):", reason);
+});
+
+process.on("uncaughtException", (error) => {
+  console.error("[companion] uncaught exception (kept running):", error?.stack || error);
+});
+
 const { getCompanionConfig } = require("../companion/companionConfig");
 const { CompanionApp } = require("../companion/companionApp");
 const { MiniMaxTtsClient } = require("../voice/ttsClient");

@@ -223,6 +223,28 @@ class VoiceActivityDetector {
     this.quietFrames = 0;
     this.voiceFrames = 0;
   }
+
+  /**
+   * Close an utterance that is still open.
+   *
+   * The detector normally waits for a hangover — a pause long enough to mean
+   * "the speaker stopped". That is right for a microphone, where the pause
+   * always comes. It is wrong for a file we already know the end of: a clip
+   * that ends mid-sentence, or one whose trailing silence is shorter than the
+   * hangover, would sit in the buffer forever and never be transcribed.
+   *
+   * Returns the accumulated PCM if a phrase is open, otherwise null.
+   */
+  flush() {
+    if (!this.active || !this.utterance.length) {
+      this.reset();
+      return null;
+    }
+
+    const pcm = Buffer.concat(this.utterance);
+    this.reset();
+    return pcm;
+  }
 }
 
 function rmsDb(frame) {
@@ -341,21 +363,34 @@ class AudioEngine {
   /**
    * Find which indices can actually be played to.
    *
-   * Writing to an index that is input-only fails with a confusing avfoundation
-   * error, so each candidate is probed with a fraction of a second of silence.
+   * Writing to an index that cannot be opened fails with a confusing
+   * error, so each candidate is probed with a fraction of a second of
+   * silence.
+   *
+   * NOTE ON WHAT THIS CAN AND CANNOT TELL YOU. ffmpeg's avfoundation is an
+   * INPUT device only — there is no avfoundation muxer — so playback on
+   * macOS goes through `audiotoolbox`, which is output-only and cannot list
+   * its devices either. The audiotoolbox output device list is a different
+   * CoreAudio list from avfoundation's input list and has its own
+   * numbering, and an index past the end of it falls back to the default
+   * output device rather than failing. So this probe proves "a device opens",
+   * not "this is the device you asked for". To be sure which device you are
+   * on, name it — a named device is passed straight through to ffmpeg.
    */
-  async probeOutputDevices(maxIndex = 8) {
+  async probeOutputDevices(maxIndex = 4) {
     const found = [];
 
     for (let index = 0; index < maxIndex; index += 1) {
       const result = await this.#run(this.ffmpegPath, [
         "-hide_banner",
         "-loglevel", "error",
-        "-f", "avfoundation",
+        "-f", "s16le",
+        "-ar", String(DEFAULT_SAMPLE_RATE),
+        "-ac", "1",
+        "-i", "/dev/zero",
         "-t", "0.15",
-        "-i", `:${index}`,
-        "-f", "null",
-        "-"
+        "-f", "audiotoolbox",
+        `:${index}`
       ]).catch((error) => ({ code: error?.code ?? 1, stderr: error?.stderr || "" }));
 
       if (result.code === 0) {
@@ -393,11 +428,18 @@ class AudioEngine {
    * The device should be the virtual microphone the voice client is reading.
    * Playing to the speakers is a separate, opt-in behaviour used for testing
    * and for when there is no transport at all.
+   *
+   * On macOS the playback path is `audiotoolbox`, not `avfoundation`:
+   * avfoundation is an input demuxer and there is no avfoundation muxer, so
+   * `-f avfoundation :0` as an output fails with "Requested output format
+   * 'avfoundation' is not known". audiotoolbox is the output side.
    */
-  async playPcm(pcm, { deviceIndex, sampleRate = DEFAULT_SAMPLE_RATE } = {}) {
+  async playPcm(pcm, { deviceIndex = 0, deviceName = null, sampleRate = DEFAULT_SAMPLE_RATE } = {}) {
     if (!Buffer.isBuffer(pcm) || pcm.length === 0) {
       return { ok: false, error: "empty_audio" };
     }
+
+    const target = deviceName ? deviceName : `:${deviceIndex}`;
 
     const child = spawn(this.ffmpegPath, [
       "-hide_banner",
@@ -406,8 +448,8 @@ class AudioEngine {
       "-ar", String(sampleRate),
       "-ac", "1",
       "-i", "pipe:0",
-      "-f", "avfoundation",
-      `:${deviceIndex}`
+      "-f", "audiotoolbox",
+      target
     ]);
 
     const stderr = [];
@@ -421,7 +463,7 @@ class AudioEngine {
       child.on("close", (code) => {
         const text = Buffer.concat(stderr).toString("utf8");
         if (code === 0) {
-          resolve({ ok: true, bytes: pcm.length, deviceIndex });
+          resolve({ ok: true, bytes: pcm.length, target });
           return;
         }
         resolve({ ok: false, error: text.trim() || `ffmpeg exited ${code}` });

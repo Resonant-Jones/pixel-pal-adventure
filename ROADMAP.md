@@ -342,6 +342,93 @@ What it needs to honour, now known precisely:
 
 ---
 
+## 0.7 The voice link — 2026-11-20, third session
+
+### What was asked
+
+Build the companion UI, and verify that two-way voice chat is synchronized in
+Minecraft.
+
+### What was built
+
+**The companion app** (`companion/`) — the piece of software that carries
+Guardian's voice in both directions. It is a separate process because
+CoreAudio is unreachable from the agent's sandbox, and because it has to
+survive the agent restarting. The contract between them is one WebSocket and
+a handful of HTTP calls. Full detail in
+`documents/documentation/architecture/voice-mode.md` §4.
+
+**The console** at `http://127.0.0.1:8788` — the link's health, the audio
+route, where everyone is, the conversation in both directions with an audition
+button per line, and a voice check that runs the whole path and reports a
+verdict per stage. It uses the project's own palette (warm paper, deep green,
+ink), so it does not look like a different product on the same machine.
+
+**Two additions to the agent side**, both of which were needed to make the
+voice link honest rather than merely working:
+
+- `GET /voice/presence` → `runtime.getVoicePresence()`. "Who is online" and
+  "where are they" are different questions. The server's tab list answers the
+  first; the loaded entity answers the second, and an entity only exists
+  when the player is close enough to be seen. An out-of-view player has a
+  *null* distance, not a made-up one.
+- `POST /voice/transcribe?feed=0` → transcribes without handing the line to
+  the agent. Without it, the only way to check that the audio about to go on
+  the wire carries the right words is to make Guardian answer its own voice.
+
+### Verified live, not inferred
+
+The voice check runs ten stages against the live stack. Nothing is mocked.
+**10/10 pass.** The stages that matter:
+
+- Guardian's synthesised audio, fetched back and transcribed by the real
+  speech provider, returns word for word: *"Voice link check. If you can hear
+  this, the link is open."*
+- A simulated player's phrase is decoded, segmented, transcribed and handled
+  by the agent as chat; Guardian answers, and the answer arrives in the world
+  chat as the same line at the same moment.
+- The voice is placed at Guardian's actual in-world position.
+
+The comparison is on **content words**, not on strings. A recogniser returns
+"what are you building today", not the exact characters spoken, and a test
+that demands an exact match fails for the wrong reason.
+
+### Three things that were wrong and are now right
+
+**A provider rate limit killed the app.** MiniMax's ASR returned HTTP 429
+(`conn limit`); the floating promise waiting on it rejected; Node's default
+for an unhandled rejection is to throw. The app died mid-conversation, and
+the voice link with it. Every awaited path now handles its own failures, the
+transcription retries with backoff, and `scripts/startCompanion.js` installs
+`unhandledRejection` and `uncaughtException` handlers so the app loses a log
+line instead of the process. The rule generalises: **this app runs beside a
+child's game. It may not be the thing that takes the machine down.**
+
+**The simulated-player path shared a voice detector with the live
+microphone.** The room noise and the test phrase interleaved inside one state
+machine, and the test phrase was never recognised. Two detectors now, two
+streams. The detector also learned to close an utterance it was told the end
+of, instead of waiting for a hangover that a 2-second clip may not contain.
+
+**The roster reported an empty room while the player was talking to
+Guardian.** The server's tab list did not carry the player, so the presence
+feed merged in the agent's own memory of who it has heard — and a plugin
+that announces itself in chat (ViaVersion) was being counted as a guest. A
+plugin is never a listener.
+
+### What is still open
+
+The transport. The last hop needs a domain and a valid certificate, the BVC
+and Simple Voice Chat Paper plugins, BlackHole (which needs an admin
+password), and the voice client on the son's iPad. **Which iPad is his** is
+still unanswered — "Chris's iPad (3)" and "Krista's iPad (2)" are both
+connected.
+
+What has been proven is everything before that hop. What has not happened is
+the son hearing it.
+
+---
+
 ## 1. Audit — verified state
 
 Verified by reading code and tracing call sites on 2026-11-20, plus running

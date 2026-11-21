@@ -434,7 +434,90 @@ async function testAppAgainstFakeAgent() {
   console.log("  ✓ the app carries a line out loud and a line back in");
 }
 
-// ------------------------------------------------------- failure is quiet
+// ------------------------------------------------------ who is in the world
+
+async function testVoicePresence() {
+  const { buildVoicePresence, recentSpeakerNames } = require("../agent/voicePresence");
+
+  const now = 1_700_000_000_000;
+
+  // A player on the tab list, in view: the distance is real.
+  const withPlayer = buildVoicePresence({
+    snapshot: {
+      dimension: "overworld",
+      position: { x: 1, y: 2, z: 3 },
+      health: 20,
+      players: [{ name: "Panda_Nuggetz", distance: 4, position: { x: 5, y: 2, z: 3 } }]
+    },
+    roster: ["Guardian", "Panda_Nuggetz"],
+    guardianName: "Guardian",
+    speakers: new Map(),
+    isApproved: (name) => name === "Panda_Nuggetz",
+    now
+  });
+
+  assert.equal(withPlayer.players.length, 1, "Guardian must not be listed as a listener");
+  assert.equal(withPlayer.players[0].name, "Panda_Nuggetz");
+  assert.equal(withPlayer.players[0].distance, 4);
+  assert.equal(withPlayer.players[0].inView, true);
+  assert.equal(withPlayer.players[0].approved, true);
+  assert.deepEqual(withPlayer.roster, ["Guardian", "Panda_Nuggetz"], "the raw roster is reported as the server said");
+
+  // The case that actually happened: the server's tab list has not caught up,
+  // but the agent has plainly heard the player speak. Dropping them would
+  // make the voice link report an empty room while someone is talking to it.
+  const heardOnly = buildVoicePresence({
+    snapshot: { dimension: "overworld", position: { x: 1, y: 2, z: 3 }, health: 20, players: [] },
+    roster: ["Guardian"],
+    guardianName: "Guardian",
+    speakers: new Map([["Panda_Nuggetz", { at: now - 5000, count: 1 }]]),
+    isApproved: (name) => name === "Panda_Nuggetz",
+    now
+  });
+
+  assert.equal(heardOnly.players.length, 1, "a player Guardian has heard must not be dropped");
+  assert.equal(heardOnly.players[0].name, "Panda_Nuggetz");
+  assert.equal(heardOnly.players[0].inView, false, "an unviewed player has no real distance");
+  assert.equal(heardOnly.players[0].distance, null, "an unviewed player must not be given a made-up distance");
+  assert.ok(heardOnly.players[0].lastHeardAt, "the time heard must be reported");
+
+  // Someone who spoke long ago has gone. The memory has a window.
+  const stale = buildVoicePresence({
+    snapshot: null,
+    roster: ["Guardian"],
+    guardianName: "Guardian",
+    speakers: new Map([["Panda_Nuggetz", { at: now - 10 * 60 * 1000, count: 1 }]]),
+    isApproved: () => true,
+    now
+  });
+
+  assert.equal(stale.players.length, 0, "a player heard ten minutes ago is not in the room now");
+
+  // And the window itself.
+  const { SPEAKER_MEMORY_MS } = require("../agent/voicePresence");
+  assert.deepEqual(recentSpeakerNames(new Map([["A", { at: now - 1000 }]]), SPEAKER_MEMORY_MS, now), ["A"]);
+  assert.deepEqual(recentSpeakerNames(new Map([["A", { at: now - 10 * 60 * 1000 }]]), SPEAKER_MEMORY_MS, now), []);
+
+  // A plugin that announces itself in chat is not a person in the world. The
+  // ViaVersion plugin posts exactly like a player does, and it was turning up
+  // in the roster as "a guest who is null blocks away".
+  const withPlugin = buildVoicePresence({
+    snapshot: null,
+    roster: ["Guardian"],
+    guardianName: "Guardian",
+    speakers: new Map([
+      ["ViaVersion", { at: now - 1000, count: 1 }],
+      ["Panda_Nuggetz", { at: now - 2000, count: 1 }]
+    ]),
+    isApproved: (name) => name === "Panda_Nuggetz",
+    now
+  });
+
+  assert.equal(withPlugin.players.length, 1, "a plugin must not be in the roster");
+  assert.equal(withPlugin.players[0].name, "Panda_Nuggetz");
+
+  console.log("  ✓ presence merges the server's roster with who Guardian has heard");
+}
 
 async function testFailuresAreQuiet() {
   const failing = async () => ({
@@ -520,6 +603,106 @@ async function testFailuresAreQuiet() {
   console.log("  ✓ a dead agent or a missing device never takes the app down");
 }
 
+// ------------------------------------------------------ a rate limit is not
+// ------------------------------------------------------ a crash
+
+async function testRateLimitDoesNotKillTheApp() {
+  // This is the failure that actually happened: the speech provider returned
+  // HTTP 429, the transcription promise rejected, and the rejection was
+  // floating. Node's default for an unhandled rejection is to throw, so the
+  // app died mid-conversation and took the voice link with it.
+  let calls = 0;
+
+  const rateLimitedOnce = async (url) => {
+    calls += 1;
+
+    if (String(url).includes("/voice/transcribe")) {
+      if (calls === 1) {
+        return {
+          ok: false,
+          status: 429,
+          json: async () => ({ ok: false, error: "ASR: HTTP 429 — conn limit" })
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ ok: true, transcript: "guardian what are you building today", speaker: "Panda_Nuggetz" })
+      };
+    }
+
+    return { ok: true, status: 200, json: async () => ({ ok: true, ready: true, enabled: true, spoken: [] }) };
+  };
+
+  const config = makeConfig({ audio: { outputDevice: null, inputDevice: null } });
+
+  const app = new CompanionApp({
+    config,
+    fetchImpl: rateLimitedOnce,
+    audioEngine: {
+      listInputDevices: async () => [],
+      probeOutputDevices: async () => [],
+      decodeToPcm: async () => Buffer.alloc(0),
+      playPcm: async () => ({ ok: false, error: "no device" }),
+      startCapture: () => {
+        const child = new EventEmitter();
+        child.stdout = new EventEmitter();
+        child.kill = () => {};
+        return new (require("../companion/audioEngine").CaptureSession)({ child, source: "device", label: "t" });
+      },
+      stopAll() {}
+    },
+    wsFactory: () => new FakeSocket(),
+    playerTts: { speak: async () => ({ audio: Buffer.alloc(1024), durationMs: 500, format: "mp3", voiceId: "t" }) },
+    logger: { log() {}, warn() {}, error() {} }
+  });
+
+  await app.start();
+
+  // A rate limit must be retried, not surfaced as a failed utterance.
+  const result = await app.simulatePlayer("Guardian, what are you building today?");
+
+  assert.equal(result.ok, true, `the retry should have succeeded: ${result.error}`);
+  assert.match(result.transcript, /building/, "the retried transcript must come through");
+
+  await app.stop();
+
+  console.log("  ✓ a provider rate limit is retried, not fatal");
+}
+
+// ------------------------------------------------------ the simulated path
+// ------------------------------------------------------ has its own detector
+
+async function testSimulatorUsesItsOwnDetector() {
+  // The microphone and the test phrase must not share a detector. When they
+  // did, the room noise and the test phrase interleaved inside one state
+  // machine and the test phrase was never recognised.
+  const { VoiceActivityDetector } = require("../companion/audioEngine");
+
+  const mic = new VoiceActivityDetector({ sampleRate: 48000, thresholdDb: -45, hangoverMs: 700 });
+  const simulator = new VoiceActivityDetector({ sampleRate: 48000, thresholdDb: -45, hangoverMs: 700 });
+
+  assert.notEqual(mic, simulator, "the two detectors must be different objects");
+
+  // The microphone sits in a quiet room: it never starts an utterance.
+  for (let i = 0; i < 20; i += 1) {
+    mic.push(silence({ milliseconds: 20 }));
+  }
+  assert.equal(mic.active, false, "silence must not start an utterance on the microphone");
+
+  // The simulated phrase starts one on its own detector.
+  const phrase = tone({ milliseconds: 400, amplitude: 0.4 });
+  simulator.push(phrase);
+  assert.equal(simulator.active, true, "the phrase must start an utterance on the simulator");
+
+  // And it can be closed without waiting for a hangover that may never come.
+  const flushed = simulator.flush();
+  assert.ok(flushed && flushed.length > 0, "flush must return the open phrase");
+  assert.equal(simulator.active, false, "flush must close the utterance");
+
+  console.log("  ✓ the microphone and the test path keep separate detectors");
+}
+
 // ------------------------------------------------------------------ run
 
 async function main() {
@@ -530,8 +713,11 @@ async function main() {
   await testWavHeader();
   await testVoiceMatching();
   await testDuckGuard();
+  await testVoicePresence();
+  await testSimulatorUsesItsOwnDetector();
   await testAppAgainstFakeAgent();
   await testFailuresAreQuiet();
+  await testRateLimitDoesNotKillTheApp();
 
   console.log("  all companion tests passed");
 }

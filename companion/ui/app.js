@@ -96,7 +96,7 @@ function renderPills(next) {
   setPill("voice", voice.enabled, voice.enabled ? "voice on" : "voice off");
 
   const output = audio.outputDevice;
-  const outputOk = Boolean(output && output.index !== null && output.index !== undefined);
+  const outputOk = Boolean(output && (output.name || (output.index !== null && output.index !== undefined)));
   setPill(
     "audio",
     outputOk,
@@ -116,7 +116,10 @@ function setPill(key, state, label) {
   const pill = document.querySelector(`[data-pill="${key}"]`);
   if (!pill) return;
 
-  const value = state === true ? "ok" : state === false ? "bad" : "warn";
+  // The state arrives as a word, not a boolean. Comparing it to `true` would
+  // make every labelled state fall through to the warning colour, which is
+  // exactly what a healthy link should not look like.
+  const value = state === "ok" || state === true ? "ok" : state === "bad" || state === false ? "bad" : "warn";
   pill.dataset.state = value;
   pill.querySelector("span").textContent = label;
 }
@@ -134,8 +137,8 @@ function renderFacts(next) {
   $("fact-voice").textContent = voice.enabled ? "enabled" : "disabled";
   $("fact-spoken").textContent = String(voice.spokenCount ?? 0);
 
-  $("fact-input").textContent = describeDevice(audio.inputDevice);
-  $("fact-output").textContent = describeDevice(audio.outputDevice);
+  $("fact-input").textContent = describeDevice(audio.inputDevice, { requireIndex: true });
+  $("fact-output").textContent = describeDevice(audio.outputDevice, { requireIndex: false });
   $("fact-permission").textContent = audio.permission || "unknown";
 
   if (presence) {
@@ -145,7 +148,7 @@ function renderFacts(next) {
 
     const nearest = (presence.players || [])[0];
     $("fact-nearest").textContent = nearest
-      ? `${nearest.name} · ${nearest.distance ?? "?"} blocks${nearest.approved ? "" : " · guest"}`
+      ? `${nearest.name} · ${nearest.inView ? `${nearest.distance ?? "?"} blocks` : "heard recently"}${nearest.approved ? "" : " · guest"}`
       : "nobody online";
   } else {
     $("fact-guardian").textContent = "unknown";
@@ -154,10 +157,14 @@ function renderFacts(next) {
   }
 }
 
-function describeDevice(device) {
+// The input device must resolve to a real index — an unmatched name means
+// the microphone is not there. The output device may legitimately be a name
+// only: macOS playback goes through audiotoolbox, which cannot list its
+// devices, so a name is how you say which one you mean.
+function describeDevice(device, { requireIndex = true } = {}) {
   if (!device) return "not configured";
   if (device.index === null || device.index === undefined) {
-    return `${device.name} (not found)`;
+    return requireIndex ? `${device.name} (not found)` : device.name;
   }
   return device.name ? `${device.name}` : `device ${device.index}`;
 }
@@ -391,7 +398,9 @@ function formatTime(iso) {
   if (!iso) return "";
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return "";
-  return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  // 24-hour. A "PM" in the log column pushes the message into a second line
+  // and the log is the one place that must stay scannable.
+  return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
 }
 
 start();

@@ -37,6 +37,7 @@ const {
 } = require("../structures/retrySchemas");
 const { FirstGreet } = require("./firstGreet");
 const { enqueueWelcomeHut } = require("./welcomeHut");
+const { buildVoicePresence, SPEAKER_MEMORY_MS } = require("./voicePresence");
 
 function escapeRegex(text) {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -202,6 +203,16 @@ class AgentRuntime {
     this.guestMode = normalizeGuestMode(guestMode);
     this.reflexObservationIntervalMs = reflexObservationIntervalMs;
     this.reflexWorkerIntervalMs = reflexWorkerIntervalMs;
+
+    // Who Guardian has heard speak, and when.
+    //
+    // The server's player list is the obvious source for "who is here", and
+    // it is not reliable on this stack: a player who is plainly in the world
+    // talking to Guardian does not always appear on the bot's tab list.
+    // A voice link that reports "nobody is here" while someone is speaking
+    // to it is worse than no report at all, so the agent keeps its own
+    // memory of who it has heard and the presence feed merges the two.
+    this.recentSpeakers = new Map();
     this.buildWorkerIntervalMs = buildWorkerIntervalMs;
     this.reflexGlobalCooldownMs = reflexGlobalCooldownMs;
     this.reflexTriggerCooldownMs = reflexTriggerCooldownMs;
@@ -971,26 +982,29 @@ class AgentRuntime {
   // shows a parent who is talking, and a guest is not the same thing as the
   // son.
   getVoicePresence() {
-    const snapshot = this.botAdapter?.getSnapshot?.() || null;
+    const presence = buildVoicePresence({
+      snapshot: this.botAdapter?.getSnapshot?.() || null,
+      roster: Object.keys(this.botAdapter?.bot?.players || {}),
+      guardianName: this.botAdapter?.bot?.username || "Guardian",
+      speakers: this.recentSpeakers,
+      isApproved: (name) => this.isApprovedPlayer(name)
+    });
 
-    const players = (snapshot?.players || []).map((player) => ({
-      name: player.name,
-      distance: player.distance ?? null,
-      position: player.position ?? null,
-      approved: this.isApprovedPlayer(player.name)
-    }));
+    return { ...presence, primaryPlayer: this.primaryPlayer ?? null };
+  }
 
-    return {
-      at: new Date().toISOString(),
-      dimension: snapshot?.dimension ?? null,
-      guardian: {
-        name: this.botAdapter?.bot?.username || "Guardian",
-        position: snapshot?.position ?? null,
-        health: snapshot?.health ?? null
-      },
-      players,
-      primaryPlayer: this.primaryPlayer ?? null
-    };
+  // Remember that this player spoke, and when.
+  //
+  // This is recorded for every message, including the ones Guardian chooses
+  // not to answer: a guest who is ignored is still a person in the world.
+  #noteSpeaker(username) {
+    const name = String(username || "").trim();
+    if (!name) {
+      return;
+    }
+
+    const existing = this.recentSpeakers.get(name);
+    this.recentSpeakers.set(name, { at: Date.now(), count: (existing?.count || 0) + 1 });
   }
 
   // Who is speaking, and therefore what they are allowed to reach.
@@ -2006,6 +2020,11 @@ class AgentRuntime {
 
   async handleChat(payload) {
     try {
+      // Someone spoke. That is evidence they are in the world, and it is
+      // recorded before any of the decide-whether-to-answer logic — a player
+      // Guardian ignores is still a player who is here.
+      this.#noteSpeaker(payload?.username);
+
       if (!this.readyForTurns || !this.shouldObserve(payload)) {
         return;
       }
