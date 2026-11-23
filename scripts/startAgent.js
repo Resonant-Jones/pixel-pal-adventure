@@ -31,6 +31,7 @@ const { ProfileStore } = require("../memory/profileStore");
 const { ReflexStateStore } = require("../memory/reflexStateStore");
 const { SessionStore } = require("../memory/sessionStore");
 const { SurrealClient } = require("../memory/surrealClient");
+const { UiPreferenceStore } = require("../memory/uiPreferenceStore");
 const { VoiceService } = require("../voice/voiceService");
 const { WorldStore } = require("../memory/worldStore");
 const { MinecraftBotAdapter } = require("../minecraft/bot");
@@ -186,6 +187,7 @@ async function main() {
   const eventStore = new EventStore(surrealClient);
   const learningStore = new LearningStore(surrealClient);
   const profileStore = new ProfileStore(surrealClient);
+  const uiPreferenceStore = new UiPreferenceStore(surrealClient);
   const worldStore = new WorldStore(surrealClient);
   const sessionStore = new SessionStore(surrealClient);
   const jobStore = new JobStore(surrealClient);
@@ -256,6 +258,7 @@ async function main() {
     companionIdentityStore,
     anchorStore,
     profileStore,
+    uiPreferenceStore,
     learningStore,
     llmClient,
     actionExecutor,

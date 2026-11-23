@@ -39,6 +39,15 @@ const { FirstGreet } = require("./firstGreet");
 const { enqueueWelcomeHut } = require("./welcomeHut");
 const { buildVoicePresence, SPEAKER_MEMORY_MS } = require("./voicePresence");
 const { hasAudience: computeAudience, isServerSender } = require("./audience");
+const {
+  createEmbedder,
+  getProviderDescriptor,
+  listProviders,
+  probeEmbedder,
+  providerEnv
+} = require("../memory/embeddings/registry");
+const { EmbeddingError } = require("../memory/embeddings/base");
+const { hasStoredCredential, storeCredential } = require("../memory/embeddings/credentials");
 
 function escapeRegex(text) {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -140,6 +149,7 @@ class AgentRuntime {
     companionIdentityStore = null,
     anchorStore = null,
     profileStore = null,
+    uiPreferenceStore = null,
     learningStore,
     llmClient,
     actionExecutor,
@@ -290,6 +300,23 @@ class AgentRuntime {
     this.commandService = new CommandService({
       logger: this.logger
     });
+
+    // The embedder is a user choice, not a deployment detail.
+    //
+    // It is picked in the console, probed before it is believed, and
+    // remembered across restarts in ui_preferences. The floor under it is
+    // the deterministic provider, which cannot fail — so the memory system
+    // is never dead, even if the chosen provider is.
+    this.uiPreferenceStore = uiPreferenceStore;
+    this.embedderChoice = { provider: "deterministic", model: null, baseUrl: null };
+    this.embedder = null;
+    this.embedderStatus = {
+      ok: true,
+      degraded: false,
+      reason: "default",
+      lastError: null,
+      dimension: null
+    };
     this.stateProjector = new StateProjector({
       getState: () => this.runtimeState,
       getLastSequence: () => this.runtimeState.lastSequence
@@ -1055,6 +1082,228 @@ class AgentRuntime {
     });
   }
 
+  // --- The embedder -------------------------------------------------------
+  //
+  // Which embedder Guardian's memory uses is the user's decision, made from
+  // the console. Three rules make that honest:
+  //
+  //   1. A choice is PROBED before it is believed. Picking a provider that
+  //      does not work reports why, in a sentence, instead of leaving the
+  //      user to discover it later as silently empty search results.
+  //   2. A choice is REMEMBERED. It lives in ui_preferences, so it survives
+  //      a restart without anyone touching a dotfile.
+  //   3. A broken choice degrades LOUDLY. The fallback is the deterministic
+  //      provider, and the status says the fallback is in use and why.
+
+  // The environment a provider should be built with.
+  //
+  // It takes the provider it is FOR. That matters: the credential store is
+  // keyed per provider, so a probe of "openai" must see the OpenAI key even
+  // while the active choice is something else. Reading the active choice's
+  // key here would make every freshly-typed key look like "no key" the moment
+  // it was most wanted.
+  #embedderEnv(providerId) {
+    return providerEnv(providerId, { env: process.env });
+  }
+
+  // The active embedder, built lazily and rebuilt when the choice changes.
+  getEmbedder() {
+    if (this.embedder && this.embedder.name === this.embedderChoice.provider) {
+      return this.embedder;
+    }
+
+    try {
+      this.embedder = createEmbedder(this.embedderChoice.provider, {
+        env: this.#embedderEnv(this.embedderChoice.provider),
+        model: this.embedderChoice.model,
+        baseUrl: this.embedderChoice.baseUrl || null
+      });
+    } catch (error) {
+      this.embedder = null;
+      this.logger.warn?.(`[embedder] could not build "${this.embedderChoice.provider}":`, error?.message || error);
+    }
+
+    return this.embedder;
+  }
+
+  // What the picker needs to draw itself: the catalogue, the current
+  // choice, and the health of both.
+  getEmbeddingStatus() {
+    const providers = listProviders(process.env).map((provider) => ({
+      ...provider,
+      active: provider.id === this.embedderChoice.provider,
+      keyStored: hasStoredCredential(provider.id)
+    }));
+
+    return {
+      current: {
+        provider: this.embedderChoice.provider,
+        model: this.embedderChoice.model,
+        baseUrl: this.embedderChoice.baseUrl || null
+      },
+      status: {
+        ...this.embedderStatus,
+        // The floor. If the chosen provider is broken, this is what is
+        // actually running, and the user is told.
+        fallbackInUse: this.embedderStatus.degraded ? "deterministic" : null
+      },
+      providers
+    };
+  }
+
+  // Test a provider without committing to it.
+  async probeEmbedder({ provider, model, baseUrl, apiKey } = {}) {
+    const target = String(provider || this.embedderChoice.provider || "").trim().toLowerCase();
+
+    if (apiKey) {
+      storeCredential(target, apiKey);
+    }
+
+    return probeEmbedder(target, {
+      env: this.#embedderEnv(target),
+      model: model || null,
+      baseUrl: baseUrl || null,
+      apiKey: apiKey || null
+    });
+  }
+
+  // Choose a provider. Probes first; refuses to select something broken
+  // unless it is the fallback that cannot break.
+  async setEmbedder({ provider, model, baseUrl, apiKey, persist = true } = {}) {
+    const target = String(provider || "").trim().toLowerCase();
+
+    if (!target) {
+      throw new EmbeddingError("No embedder was chosen.", { code: "not_configured" });
+    }
+
+    const descriptor = getProviderDescriptor(target, process.env);
+    if (!descriptor) {
+      throw new EmbeddingError(`Unknown embedder "${target}".`, {
+        code: "unknown_provider",
+        remedy: `Choose one of: ${listProviders(process.env).map((item) => item.id).join(", ")}.`
+      });
+    }
+
+    if (apiKey) {
+      storeCredential(target, apiKey);
+    }
+
+    const probe = await probeEmbedder(target, {
+      env: this.#embedderEnv(target),
+      model: model || null,
+      baseUrl: baseUrl || null
+    });
+
+    if (!probe.ok) {
+      this.embedderStatus = {
+        ok: false,
+        degraded: this.embedderChoice.provider !== "deterministic",
+        reason: probe.code,
+        lastError: probe.error,
+        dimension: null
+      };
+
+      this.emitRuntimeEvent("embedder_probe_failed", {
+        provider: target,
+        error: probe.error,
+        code: probe.code,
+        remedy: probe.remedy || null
+      });
+
+      return {
+        ok: false,
+        selected: false,
+        provider: target,
+        probe,
+        status: this.getEmbeddingStatus()
+      };
+    }
+
+    this.embedderChoice = {
+      provider: target,
+      model: model || probe.model || descriptor.defaultModel || null,
+      // The address travels with the choice. A Codexify backend on the
+      // server is not the same address as the one on this laptop, and the
+      // panel is where that difference gets settled — so the address the
+      // user typed has to survive a restart along with the provider.
+      baseUrl: baseUrl || null
+    };
+    this.embedder = null;
+    this.embedderStatus = {
+      ok: true,
+      degraded: false,
+      reason: null,
+      lastError: null,
+      dimension: probe.dimension
+    };
+
+    this.setRuntimeState({
+      liveConfig: {
+        ...this.runtimeState.liveConfig,
+        embedder: { ...this.embedderChoice }
+      }
+    });
+
+    if (persist && this.uiPreferenceStore) {
+      try {
+        await this.uiPreferenceStore.set("memory.embedder", {
+          ...this.embedderChoice,
+          updated_at: new Date().toISOString()
+        });
+      } catch (error) {
+        this.logger.warn?.("[embedder] could not save the preference:", error?.message || error);
+      }
+    }
+
+    this.emitRuntimeEvent("embedder_selected", {
+      provider: target,
+      model: this.embedderChoice.model,
+      dimension: probe.dimension
+    });
+
+    return {
+      ok: true,
+      selected: true,
+      provider: target,
+      probe,
+      status: this.getEmbeddingStatus()
+    };
+  }
+
+  // Restore the choice from ui_preferences at startup.
+  async loadEmbedderPreference() {
+    if (!this.uiPreferenceStore) {
+      return null;
+    }
+
+    try {
+      const stored = await this.uiPreferenceStore.get("memory.embedder");
+      const provider = stored?.value?.provider;
+
+      if (!provider) {
+        return null;
+      }
+
+      this.embedderChoice = {
+        provider,
+        model: stored?.value?.model || null,
+        baseUrl: stored?.value?.baseUrl || null
+      };
+      this.setRuntimeState({
+        liveConfig: {
+          ...this.runtimeState.liveConfig,
+          embedder: { ...this.embedderChoice }
+        }
+      });
+
+      this.logger.info?.(`[embedder] restored "${provider}" from ui_preferences`);
+      return this.embedderChoice;
+    } catch (error) {
+      this.logger.warn?.("[embedder] could not restore the preference:", error?.message || error);
+      return null;
+    }
+  }
+
   // Who is speaking, and therefore what they are allowed to reach.
   //
   // "approved" means the player is on the family's vetted list: the primary
@@ -1801,6 +2050,11 @@ class AgentRuntime {
     await this.initializeWorldContext();
     await this.loadActiveIdentity();
     await this.ensureDefaultProfiles();
+
+    // The embedder the user chose last time. Restored before anything can
+    // ask for a vector, so the first memory written after a restart uses the
+    // same provider as the last one before it.
+    await this.loadEmbedderPreference();
     const identityProfile = this.getIdentityPromptProfile();
 
     await this.messageStore.ensureCharacter({

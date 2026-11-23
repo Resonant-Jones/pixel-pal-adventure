@@ -45,6 +45,7 @@ const {
   resolveOutputDevice,
   isBlockedInput
 } = require("./deviceResolver");
+const { InputGuard } = require("./inputGuard");
 
 const MAX_TRANSCRIPT_ENTRIES = 60;
 const MAX_LOG_ENTRIES = 120;
@@ -56,7 +57,8 @@ class CompanionApp extends EventEmitter {
     fetchImpl = globalThis.fetch,
     audioEngine = null,
     playerTts = null,
-    wsFactory = null
+    wsFactory = null,
+    inputGuard = null
   } = {}) {
     super();
 
@@ -77,6 +79,22 @@ class CompanionApp extends EventEmitter {
     // A second speech client, used only to speak *as* the player on the test
     // path. It is deliberately a different voice from Guardian's.
     this.playerTts = playerTts;
+
+    // The microphone watchdog.
+    //
+    // macOS will hand the default input to the family's iPhone whenever the
+    // Continuity Camera is in use, and macOS 27.2 has no switch to stop it.
+    // This holds the default on the machine's own microphone so that the
+    // system's idea of "the microphone" matches ours.
+    //
+    // It is a convenience, not a boundary — the capture path pins its own
+    // device by name and refuses the phone outright regardless.
+    this.inputGuard =
+      inputGuard ||
+      new InputGuard({
+        deviceName: config.audio.inputDevice?.name || "MacBook Air Microphone",
+        logger
+      });
 
     this.socket = null;
     this.reconnectDelayMs = 1000;
@@ -143,6 +161,11 @@ class CompanionApp extends EventEmitter {
 
     await this.#discoverAudio();
 
+    // Hold the system's default input on this machine's own microphone.
+    // Started before anything else so the window in which macOS could hand
+    // the input to the phone is as small as possible.
+    this.inputGuard.start();
+
     this.#connectControlPlane();
     this.#startPresencePolling();
     await this.#startCapture();
@@ -174,6 +197,8 @@ class CompanionApp extends EventEmitter {
 
     this.socket?.close();
     this.socket = null;
+
+    this.inputGuard.stop();
 
     this.#stopCapture();
 
@@ -404,7 +429,13 @@ class CompanionApp extends EventEmitter {
 
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) {
-      throw new Error(payload?.error || `HTTP ${response.status}`);
+      // Keep the detail. "No API key" with a remedy is an answer; "HTTP 422"
+      // is a shrug.
+      const error = new Error(payload?.error || `HTTP ${response.status}`);
+      error.code = payload?.code || `http_${response.status}`;
+      error.remedy = payload?.remedy || null;
+      error.payload = payload;
+      throw error;
     }
 
     return payload;
@@ -1040,6 +1071,34 @@ class CompanionApp extends EventEmitter {
       return json(response, 200, { ok: true, ...result });
     }
 
+    // The embedder picker. The console asks here; this asks the agent.
+    if (request.method === "GET" && url.pathname === "/api/memory/embedder") {
+      const result = await this.controlGet("/memory/embedder");
+      return json(response, 200, result);
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/memory/embedder/probe") {
+      const body = await readJson(request);
+      const result = await this.controlPost("/memory/embedder/probe", body);
+      return json(response, 200, result);
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/memory/embedder") {
+      const body = await readJson(request);
+
+      try {
+        const result = await this.controlPost("/memory/embedder", body);
+        return json(response, 200, result);
+      } catch (error) {
+        return json(response, 422, {
+          ok: false,
+          error: error?.message || String(error),
+          code: error?.code || "embedding_failed",
+          remedy: error?.remedy || null
+        });
+      }
+    }
+
     if (request.method === "GET" && url.pathname.startsWith("/api/audio/")) {
       const id = path.basename(url.pathname);
       const file = this.#findStagedAudio(id);
@@ -1131,6 +1190,10 @@ class CompanionApp extends EventEmitter {
         host: this.config.listen.host,
         port: this.config.listen.port,
         startedAt: this.state.startedAt
+      },
+      audio: {
+        ...this.state.audio,
+        inputGuard: this.inputGuard.getStatus()
       }
     };
   }

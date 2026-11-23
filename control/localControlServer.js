@@ -278,6 +278,45 @@ class LocalControlServer {
       return;
     }
 
+    // Which embedder Guardian's memory uses.
+    //
+    // This is a picker, not a configuration file. The catalogue always lists
+    // every provider a user could pick — including the ones that need a key
+    // they have not entered yet — and each one carries its own status, so the
+    // user can see what is available rather than reading a stack trace to
+    // find out what is not.
+    if (request.method === "GET" && requestUrl.pathname === "/memory/embedder") {
+      json(response, 200, {
+        ok: true,
+        ...(this.runtime?.getEmbeddingStatus?.() || { providers: [], current: null, status: null })
+      });
+      return;
+    }
+
+    if (request.method === "POST" && requestUrl.pathname === "/memory/embedder/probe") {
+      const body = await readJsonBody(request);
+      const probe = await this.runtime.probeEmbedder(body);
+      json(response, 200, { ok: probe.ok, probe });
+      return;
+    }
+
+    if (request.method === "POST" && requestUrl.pathname === "/memory/embedder") {
+      const body = await readJsonBody(request);
+
+      try {
+        const result = await this.runtime.setEmbedder(body);
+        json(response, result.ok ? 200 : 422, { ...result, ok: result.ok });
+      } catch (error) {
+        json(response, 400, {
+          ok: false,
+          error: error?.message || String(error),
+          code: error?.code || "embedding_failed",
+          remedy: error?.remedy || null
+        });
+      }
+      return;
+    }
+
     if (request.method === "POST" && requestUrl.pathname.startsWith("/command/")) {
       const body = await readJsonBody(request);
       const type = requestUrl.pathname.replace("/command/", "").replace(/-/g, "_");

@@ -44,6 +44,7 @@
             <div><dt>player speaks via</dt><dd id="fact-input">—</dd></div>
             <div><dt>guardian speaks via</dt><dd id="fact-output">—</dd></div>
             <div><dt>microphone</dt><dd id="fact-permission">—</dd></div>
+            <div><dt>system microphone</dt><dd id="fact-guard">—</dd></div>
           </dl>
           <div class="meter" title="input level">
             <div class="meter-fill" id="level-fill"></div>
@@ -104,6 +105,38 @@
           <h3>Voice check</h3>
           <button class="btn" id="btn-verify">Run the check</button>
           <ol class="stages" id="stages"></ol>
+        </div>
+      </section>
+
+      <!-- ---------------------------------------------------------------- -->
+      <section class="panel memory" aria-labelledby="memory-title">
+        <div class="panel-head">
+          <h2 id="memory-title">Memory</h2>
+          <span class="hint">how Guardian turns a sentence into something it can find again</span>
+        </div>
+
+        <div class="memory-body">
+          <div class="providers" id="embedder-providers" role="radiogroup" aria-label="Embedder"></div>
+
+          <div class="embedder">
+            <div class="embedder-head">
+              <h3 id="embedder-title">—</h3>
+              <span class="badge" id="embedder-badge" hidden></span>
+            </div>
+
+            <p class="blurb" id="embedder-blurb"></p>
+            <p class="note" id="embedder-notes"></p>
+
+            <div class="fields" id="embedder-fields"></div>
+
+            <div class="actions">
+              <button class="btn" id="btn-embedder-test" type="button">Test it</button>
+              <button class="btn primary" id="btn-embedder-use" type="button">Use this one</button>
+              <span class="hint" id="embedder-current"></span>
+            </div>
+
+            <p class="result" id="embedder-result" hidden></p>
+          </div>
         </div>
       </section>
 
