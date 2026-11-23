@@ -23,7 +23,7 @@
   like it was speaking while playing silence. That is worse than not running.
 
   Install it with:
-      ./scripts/installCompanionAgent.sh
+      ./scripts/installLaunchAgents.sh
   Stop it with:
       launchctl bootout gui/$UID/com.guardian.companion
 -->

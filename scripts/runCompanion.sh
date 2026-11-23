@@ -20,8 +20,8 @@
 #
 # BACKGROUND
 #
-#   ./scripts/installCompanionAgent.sh      install as a LaunchAgent and start
-#   ./scripts/installCompanionAgent.sh --remove   stop and uninstall
+#   ./scripts/installLaunchAgents.sh      install as a LaunchAgent and start
+#   ./scripts/installLaunchAgents.sh --remove   stop and uninstall
 #
 # launchd is used rather than a nohup'd background job because the app has to
 # survive the agent session that started it. A nohup'd child dies with its

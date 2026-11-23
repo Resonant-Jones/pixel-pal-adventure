@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  com.guardian.agent.plist
+
+  Guardian itself, as a LaunchAgent.
+
+  WHY A PLIST AND NOT `launchctl submit`
+
+  `launchctl submit` no longer works on macOS 27.2 — it exits 1 with a usage
+  message for every command, including /usr/bin/true.
+
+  WHY IT IS NOT A BACKGROUND JOB
+
+  A background task started by a coding session has a one-hour ceiling, and
+  when the ceiling fires the agent is sent SIGTERM and leaves the world.
+  Paper, SurrealDB and the companion app all keep running, so the failure
+  looks partial: the console still connects, the world is still there, and
+  Guardian has silently gone. launchd has no such ceiling, and a
+  bootstrapped LaunchAgent also comes back on login.
+
+  Install it with:
+      ./scripts/installLaunchAgents.sh
+-->
+<plist version="1.0">
+  <dict>
+    <key>Label</key>
+    <string>com.guardian.agent</string>
+
+    <key>ProgramArguments</key>
+    <array>
+      <string>/bin/bash</string>
+      <string>/Users/resonant_jones/Keep/MineCraft_Companion/minecraft-ai-companion/scripts/runAgent.sh</string>
+    </array>
+
+    <!-- dotenv reads .env from the working directory, so this must be the
+         repository root or the agent starts with no configuration at all. -->
+    <key>WorkingDirectory</key>
+    <string>/Users/resonant_jones/Keep/MineCraft_Companion/minecraft-ai-companion</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>LimitLoadToSessionType</key>
+    <array>
+      <string>Aqua</string>
+    </array>
+
+    <key>StandardOutPath</key>
+    <string>/Users/resonant_jones/Keep/MineCraft_Companion/minecraft-ai-companion/.local/logs/agent.out</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/resonant_jones/Keep/MineCraft_Companion/minecraft-ai-companion/.local/logs/agent.err</string>
+
+    <key>ProcessType</key>
+    <string>Interactive</string>
+  </dict>
+</plist>

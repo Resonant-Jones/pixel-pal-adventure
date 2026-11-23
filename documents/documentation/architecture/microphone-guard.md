@@ -126,8 +126,9 @@ companion/guardDefaultInput.swift   the watchdog
 companion/inputGuard.js             spawns it, restarts it if it dies, reports status
 companion/companionApp.js           starts it on boot, stops it on shutdown
 scripts/buildInputGuard.sh          builds it into .local/bin/
+scripts/com.guardian.agent.plist     Guardian as a LaunchAgent
 scripts/com.guardian.companion.plist the companion app as a LaunchAgent
-scripts/installCompanionAgent.sh    installs and starts it
+scripts/installLaunchAgents.sh      installs and starts both
 tests/inputGuard.test.js            a missing binary must not take the app down
 ```
 
@@ -135,6 +136,12 @@ The binary lives in `.local/bin/` because a compiled binary does not belong
 in the repository. If it is missing, the companion app says so and carries on
 — a convenience that takes the app down with it would be worse than not
 having it.
+
+**Both the agent and the console run as LaunchAgents**, because they have to
+survive the coding session that started them. A background task has a
+one-hour ceiling, and when the ceiling fires the agent is sent SIGTERM and
+leaves the world while Paper, SurrealDB and the console all keep running — a
+failure that looks partial and that nothing restarts.
 
 **The app has to run outside the agent's sandbox**, because CoreAudio is not
 visible from inside it: AVFoundation cannot even enumerate the devices, so an
@@ -148,10 +155,10 @@ which is also better, because a submitted job died with the session that
 made it and this one comes back on login.
 
 ```
-./scripts/installCompanionAgent.sh            install and start
-./scripts/installCompanionAgent.sh --remove   stop and uninstall
+./scripts/installLaunchAgents.sh            install and start both
+./scripts/installLaunchAgents.sh --remove   stop and uninstall both
 ```
 
-The console shows it under **The link → Audio route → system microphone**:
-`held on MacBook Air Microphone`, or `held on MacBook Air Microphone (took
-it back 3 times)` if it had to intervene.
+The console shows the watchdog under **The link → Audio route → system
+microphone**: `held on MacBook Air Microphone`, or `held on MacBook Air
+Microphone (took it back 3 times)` if it had to intervene.
