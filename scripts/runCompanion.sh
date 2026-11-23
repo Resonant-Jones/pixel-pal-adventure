@@ -20,12 +20,18 @@
 #
 # BACKGROUND
 #
-#   launchctl submit -l com.guardian.companion -- /bin/bash "$PWD/scripts/runCompanion.sh"
-#   launchctl remove  com.guardian.companion        # stop it again
+#   ./scripts/installCompanionAgent.sh      install as a LaunchAgent and start
+#   ./scripts/installCompanionAgent.sh --remove   stop and uninstall
 #
 # launchd is used rather than a nohup'd background job because the app has to
 # survive the agent session that started it. A nohup'd child dies with its
 # shell; a launchd job does not.
+#
+# `launchctl submit` used to be the way to do this. On macOS 27.2 it exits 1
+# with a usage message for every command — including /usr/bin/true — so the
+# job is now a real plist bootstrapped into the GUI session. That is also
+# better: a submitted job died with the session that made it, and this one
+# comes back on login.
 
 set -euo pipefail
 

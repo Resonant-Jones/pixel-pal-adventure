@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  com.guardian.companion.plist
+
+  The companion app as a LaunchAgent.
+
+  WHY A PLIST AND NOT `launchctl submit`
+
+  `launchctl submit` no longer works on macOS 27.2 — it exits 1 with a usage
+  message for every command, including /usr/bin/true. A transient submitted
+  job was how this ran before; a plist bootstrapped into the user's GUI
+  session is the mechanism that still works, and it has the advantage of
+  surviving a logout: `launchctl submit` created a job that died with the
+  session that made it.
+
+  WHY IT RUNS OUTSIDE THE AGENT'S SANDBOX AT ALL
+
+  The companion app has to open CoreAudio. Inside the agent's sandbox
+  AVFoundation cannot even enumerate the devices — ffmpeg fails with
+  "Error opening input: Input/output error" — so an app started from there
+  would look like it was listening while capturing nothing, and would look
+  like it was speaking while playing silence. That is worse than not running.
+
+  Install it with:
+      ./scripts/installCompanionAgent.sh
+  Stop it with:
+      launchctl bootout gui/$UID/com.guardian.companion
+-->
+<plist version="1.0">
+  <dict>
+    <key>Label</key>
+    <string>com.guardian.companion</string>
+
+    <key>ProgramArguments</key>
+    <array>
+      <string>/bin/bash</string>
+      <string>/Users/resonant_jones/Keep/MineCraft_Companion/minecraft-ai-companion/scripts/runCompanion.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/resonant_jones/Keep/MineCraft_Companion/minecraft-ai-companion</string>
+
+    <!-- Start it when the session starts, and keep it alive. A companion
+         that is only up when someone remembers to start it is not a
+         companion. -->
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+
+    <!-- Do not fight the user's session: if they log out, it goes with
+         them, and it comes back when they log in. -->
+    <key>LimitLoadToSessionType</key>
+    <array>
+      <string>Aqua</string>
+    </array>
+
+    <key>StandardOutPath</key>
+    <string>/Users/resonant_jones/Keep/MineCraft_Companion/minecraft-ai-companion/.local/logs/companion.out</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/resonant_jones/Keep/MineCraft_Companion/minecraft-ai-companion/.local/logs/companion.err</string>
+
+    <key>ProcessType</key>
+    <string>Interactive</string>
+  </dict>
+</plist>

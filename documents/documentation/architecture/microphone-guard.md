@@ -126,6 +126,8 @@ companion/guardDefaultInput.swift   the watchdog
 companion/inputGuard.js             spawns it, restarts it if it dies, reports status
 companion/companionApp.js           starts it on boot, stops it on shutdown
 scripts/buildInputGuard.sh          builds it into .local/bin/
+scripts/com.guardian.companion.plist the companion app as a LaunchAgent
+scripts/installCompanionAgent.sh    installs and starts it
 tests/inputGuard.test.js            a missing binary must not take the app down
 ```
 
@@ -133,6 +135,22 @@ The binary lives in `.local/bin/` because a compiled binary does not belong
 in the repository. If it is missing, the companion app says so and carries on
 — a convenience that takes the app down with it would be worse than not
 having it.
+
+**The app has to run outside the agent's sandbox**, because CoreAudio is not
+visible from inside it: AVFoundation cannot even enumerate the devices, so an
+app started from there would look like it was listening while capturing
+nothing. That is why it is a LaunchAgent.
+
+`launchctl submit` — the way it used to be started — no longer works on
+macOS 27.2: it exits 1 with a usage message for every command, including
+`/usr/bin/true`. It is now a real plist bootstrapped into the GUI session,
+which is also better, because a submitted job died with the session that
+made it and this one comes back on login.
+
+```
+./scripts/installCompanionAgent.sh            install and start
+./scripts/installCompanionAgent.sh --remove   stop and uninstall
+```
 
 The console shows it under **The link → Audio route → system microphone**:
 `held on MacBook Air Microphone`, or `held on MacBook Air Microphone (took
