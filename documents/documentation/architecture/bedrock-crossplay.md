@@ -73,30 +73,98 @@ minecraft-data (newest release)     tops out at 26.1        ✗ TOO OLD
 ```
 
 The last link is the one that is usually missed. **minecraft-data — the
-protocol table mineflayer uses — still tops out at `26.1` even at the newest
-release** (verified by reading `data/pc/common/versions.json` from master;
-the list ends `1.21.11, 26.1`). So Guardian's bot cannot speak to a Paper
-26.3 server directly.
+protocol table mineflayer uses — still tops out at `26.1` (protocol 775) even
+at the newest release** (verified by reading `data/pc/common/versions.json`
+and the `data/pc/` directory listing from master; the list ends
+`1.21.11, 26.1`, and `data/pc/26.1` is the newest protocol directory that
+exists). So Guardian's bot cannot speak to a Paper 26.2 or 26.3 server
+directly, and the newest protocol it *can* speak is one version below the
+newest protocol it would need.
 
-### The way out: ViaVersion, which is already installed
+### The translation plugin is not the one you would guess
 
-ViaVersion's entire job is letting an older client join a newer server.
-Paper 26.3 + ViaVersion is a `26.1 → 26.3` translation, and the installed
-ViaVersion 5.12.1 already carries the `Protocol26_2To26_3` mapping.
+This is worth getting right, because the obvious answer is the wrong one.
 
-So the migration path is:
+| plugin | direction | what it is for |
+|---|---|---|
+| **ViaVersion** | **new client → old server** | a 26.3 player joining a 1.21 server |
+| **ViaBackwards** | **old client → new server** | a 1.21 bot joining a 26.3 server |
+| ViaRewind | very old client → new server | 1.7-era clients |
 
-1. Paper 1.21.11 → 26.3 (stable, available today)
-2. Geyser 2.11.3 → current release
-3. `transport: raknet` → `both`, with `webrtc-port: 19133` (it must differ
-   from 19132 when both transports run in parallel)
-4. Keep ViaVersion 5.12.1 so the bot's 26.1 client still joins
-5. Bump mineflayer 4.37.0 → 4.39.0 while we are there
+We need the **second** one. Installing ViaVersion alone does nothing here,
+and the symptom is misleading: the server still refuses the client with
+"Outdated client! Please use version X", which looks exactly like the
+plugin not being installed at all.
 
-**The unknown in that plan is the world.** Paper 1.21.11 → 26.3 is a large
-jump, and whether the existing survival world — the cave, the paused TNT
-build — survives it is not something to guess at. That is the first thing to
-test, and it is a decision with a real cost either way.
+### The way out
+
+ViaBackwards 5.12.2's release notes carry a `26.3->26.2` mapping. The
+client side needs protocol 776.
+
+So the migration is:
+
+1. Paper 1.21.11 → **26.3** (stable; build 261 was rebuilt 2026-11-24).
+   Paper 26.2 is also stable; **26.1 has no published builds at all.**
+2. Geyser 2.11.3 → current release (Bedrock 26.40–26.65, Java 26.3).
+3. `transport: raknet` → `both`, with `webrtc-port: 19133` — NetherNet is
+   mandatory for Bedrock 26.60+.
+4. ViaVersion → **ViaBackwards** 5.12.2, alongside ViaVersion.
+5. mineflayer 4.37.0 → **4.39.0** with minecraft-data **3.119.0**, which
+   brings protocol 775 (26.1) — and, when it lands, 776 (26.2).
+
+## 3b. What was tested, and what the result was
+
+This is not a plan; these are measurements, taken on a **copy** of the world
+on ports 25566/25567. The live world and the live server were not touched.
+
+**The world survives the Paper jump. That is the good news.**
+
+```
+[INFO]: [WorldFolderMigration] Starting upgrade for world "world"
+[INFO]: [WorldFolderMigration] Applying file structure changes for world "world"
+[INFO]: [WorldFolderMigration] Done applying file structure changes...
+[INFO]: [VanillaWorldMigration] Completed Vanilla import for world 'world'
+[INFO]: Preparing level "world"
+[INFO]: Done (36.465s)! For help, type "help"
+```
+
+Paper 26.3 restructures the world into `dimensions/minecraft/overworld/`
+and runs the data converters. All nine overworld region files, the entity
+region files, the player data and the nether came across. 29 MB before,
+31 MB after. Paper 26.2 loads the same migrated world.
+
+**The bot does not follow. That is the bad news, and it is precise.**
+
+| attempt | client | server | result |
+|---|---|---|---|
+| ViaVersion 5.12.1 | 774 (1.21.11) | 777 (26.3) | refused — "Outdated client" |
+| ViaVersion 5.12.2 | 775 (26.1) | 777 (26.3) | refused — "Outdated client" |
+| ViaBackwards 5.12.2 | 775 (26.1) | 777 (26.3) | refused — "Outdated client" |
+| ViaBackwards 5.12.2 | 775 (26.1) | 776 (26.2) | refused — "Outdated client" |
+
+**The gap is exactly one protocol version wide, and it is upstream.**
+
+- ViaBackwards 5.12.2 can put a **776 (26.2)** client onto a **777 (26.3)**
+  server. It will not go down to 775.
+- minecraft-data's newest release speaks **775 (26.1)** and has no data for
+  776. There is no 26.2 directory in `data/pc/`.
+
+So there is no client/server pair available today that both sides support.
+It closes when either:
+
+- **minecraft-data ships 26.2 protocol data** — then the bot speaks 776 and
+  ViaBackwards translates it onto 26.3. A data-generation PR.
+- **ViaBackwards adds a `26.3->26.1` mapping** — then the bot stays at 775.
+  A protocol-mapping PR.
+
+Both are the kind of change those projects ship every few weeks, and both
+are on the critical path of a project that is actively releasing (Geyser
+rebuilt today; Paper rebuilt today; ViaVersion and ViaBackwards released
+2026-10-27).
+
+**Which means: the iPad is not blocked by anything we chose. It is blocked
+by a one-version gap between two upstream projects, and the world is ready
+to move the moment that closes.**
 
 ## 4. What is installed and running
 
@@ -249,9 +317,28 @@ Plain, and true:
 | Java port 25565 / Bedrock port UDP 19132 | done, verified live |
 | Crossplay confirmed with a real iPad | **never done — no iPad has joined** |
 | Which iPad is the son's | **unknown** ("Chris's iPad (3)" vs "Krista's iPad (2)") |
-| What Bedrock version is the iPad on | **unknown** — decides everything below |
-| Paper 1.21.11 → 26.3 migration | **not done** — and the world may not survive it |
+| What Bedrock version is the iPad on | **unknown** — decides whether the migration is needed at all |
+| The world survives Paper 26.3 | **done — verified by running it on a copy** |
+| The bot can follow the server | **NOT yet — blocked by a one-version upstream gap** |
 | Geyser updated + `transport: both` + NetherNet | **not done** — needs the Paper bump first |
 | BVC beta.15 (if we stay on 1.21.11) | **not done** — needs TLS + a domain + the app on the iPad |
 | VoiceCraft evaluation | **not done** — arguably the better fit |
 | Bedrock Voice Chat plugin + BlackHole | **not done** — needs TLS + a domain + an admin password |
+
+## 8. Two test servers are still running
+
+The verification in §3b left two Paper instances alive on **127.0.0.1:25566**
+and **127.0.0.1:25567**, against copies of the world in
+`.local/worldtest/`. They are harmless — localhost only, a copy of the
+world, and the live server was never touched — but they should not be left
+running:
+
+```bash
+kill $(lsof -nP -i TCP:25566 -t) $(lsof -nP -i TCP:25567 -t)
+```
+
+The agent's sandbox could not signal them (both were started by
+backgrounded tasks, so `kill` returned "Operation not permitted"), and the
+Terminal was on another Space at the time, so this one is left to a shell
+with the user's own permissions.
+
