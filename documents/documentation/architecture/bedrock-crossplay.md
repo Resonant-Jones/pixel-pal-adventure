@@ -1,9 +1,13 @@
 # Bedrock crossplay — what is installed, what is missing, and what to say
 
-**Written:** 2026-11-23
-**Status:** the bridge is installed and listening. Two gaps are known and
-neither of them is "we turned Bedrock off". Crossplay has still never been
-confirmed at runtime — no iPad has ever joined.
+**Written:** 2026-11-23. **Revised:** 2026-11-24, with every version claim
+below verified against the running server, the upstream release notes, and the
+published plugin binaries rather than inferred.
+
+**Status:** the bridge is installed and listening. Crossplay has still never
+been confirmed at runtime — no iPad has ever joined — and the gap is now
+precisely known: **the iPad cannot join today, and the reason is a version
+chain, not a decision.**
 
 ---
 
@@ -14,18 +18,89 @@ disabled to make the Java-first version work. The bridge is installed, it is
 running, and it is listening for Bedrock players right now.
 
 What is missing is **a plugin for voice**, not the game. Bedrock projection —
-the son joining from his iPad and playing the same world Guardian is in — is
-still entirely possible and was never traded away.
+the son joining from his iPad and playing the same world Guardian is in —
+was never traded away.
 
-Two real gaps are known, and they are version work rather than decisions:
+But there is a third thing, which the first draft of this document did not
+know about, and it is the thing that matters:
 
-1. The installed Geyser is behind the current Bedrock client version.
-2. The transport is set to RakNet only; current Bedrock clients prefer
-   NetherNet signaling.
+> **The iPad cannot join today.** The installed Geyser speaks Bedrock
+> 26.30–26.52. The current Bedrock client is 26.65, with 26.66 next. The
+> server says so itself, on every boot, in its own log.
 
-## 2. What is installed and running
+## 2. Is there an update to Minecraft?
 
-Checked live on 2026-11-23 against the running server:
+Yes — and it is not the one anyone would hope for.
+
+| | current | released |
+|---|---|---|
+| Bedrock | 26.65 (26.66 next, 26.70 in development) | 26.65 on 2026-11-16 |
+| Java | 26.3 | Paper 26.3 STABLE, rebuilt 2026-11-24 |
+
+**And there is still no built-in voice chat in Bedrock.** Native Bedrock
+voice chat remains an open feature request on Minecraft's own feedback
+board, not a shipped feature. Whatever a third-party assistant says about
+that, it is right: Geyser bridges *gameplay*, not the microphone.
+
+The update that actually bites is this one:
+
+> **Bedrock 26.60 (27 October 2026) made NetherNet mandatory.** Current
+> Bedrock clients no longer negotiate over RakNet alone. The installed
+> Geyser is configured `transport: raknet`, so the transport change is no
+> longer a nicety — it is required.
+
+## 3. The version chain, exactly
+
+This is the part worth understanding, because every link is a real
+dependency and they pull in one direction.
+
+```
+Bedrock client on the iPad         26.65 / 26.66
+        │
+        │  must be spoken by Geyser
+        ▼
+Geyser (installed: 2.11.3)         Bedrock 26.30 – 26.52   ✗ TOO OLD
+Geyser (current release)            Bedrock 26.40 – 26.65   ✓ but speaks
+        │                                                      Java 26.3
+        │  must be spoken by Paper
+        ▼
+Paper (installed: 1.21.11)         Java 1.21               ✗ TOO OLD
+Paper (current release)             26.3 STABLE             ✓
+        │
+        │  must be spoken by the bot's client
+        ▼
+minecraft-data (newest release)     tops out at 26.1        ✗ TOO OLD
+```
+
+The last link is the one that is usually missed. **minecraft-data — the
+protocol table mineflayer uses — still tops out at `26.1` even at the newest
+release** (verified by reading `data/pc/common/versions.json` from master;
+the list ends `1.21.11, 26.1`). So Guardian's bot cannot speak to a Paper
+26.3 server directly.
+
+### The way out: ViaVersion, which is already installed
+
+ViaVersion's entire job is letting an older client join a newer server.
+Paper 26.3 + ViaVersion is a `26.1 → 26.3` translation, and the installed
+ViaVersion 5.12.1 already carries the `Protocol26_2To26_3` mapping.
+
+So the migration path is:
+
+1. Paper 1.21.11 → 26.3 (stable, available today)
+2. Geyser 2.11.3 → current release
+3. `transport: raknet` → `both`, with `webrtc-port: 19133` (it must differ
+   from 19132 when both transports run in parallel)
+4. Keep ViaVersion 5.12.1 so the bot's 26.1 client still joins
+5. Bump mineflayer 4.37.0 → 4.39.0 while we are there
+
+**The unknown in that plan is the world.** Paper 1.21.11 → 26.3 is a large
+jump, and whether the existing survival world — the cave, the paused TNT
+build — survives it is not something to guess at. That is the first thing to
+test, and it is a decision with a real cost either way.
+
+## 4. What is installed and running
+
+Checked live on 2026-11-24 against the running server:
 
 ```
 minecraft-server/plugins/Geyser-Spigot.jar        47,170,037 bytes
@@ -33,19 +108,15 @@ minecraft-server/plugins/floodgate-spigot.jar    11,561,096 bytes
 minecraft-server/plugins/floodgate/key.pem       present
 ```
 
-Geyser-Spigot v2.11.3-SNAPSHOT (build b1249), Floodgate 2.2.5-SNAPSHOT.
+Geyser-Spigot v2.11.3-SNAPSHOT (build b1249), Floodgate 2.2.5-SNAPSHOT,
+ViaVersion 5.12.1. Paper 1.21.11 build 132.
 
 The server log, on every start:
 
 ```
-[14:21:36 INFO]: [Geyser-Spigot] Started Geyser on UDP port 19132
-```
-
-The Paper JVM holds the port:
-
-```
-COMMAND   PID    FD   TYPE  DEVICE  NODE  NAME
-java    53672   169u  IPv6  ...     0t0   UDP *:19132
+[INFO]: [Geyser-Spigot] Started Geyser on UDP port 19132
+[INFO]: [Geyser-Spigot] There's a new Geyser update available to support
+        Bedrock version 26.66. Download it here: https://geysermc.org/download
 ```
 
 `Geyser-Spigot/config.yml`:
@@ -54,89 +125,97 @@ java    53672   169u  IPv6  ...     0t0   UDP *:19132
 bedrock:
   address: 0.0.0.0
   port: 19132
-  transport: raknet
-  webrtc-port: 0
+  transport: raknet        # ← must become "both" for Bedrock 26.60+
+  webrtc-port: 0           # ← must become 19133 when both run in parallel
 ```
 
 And `server.properties` has `enforce-secure-profile=false`, which is what a
 Bedrock client needs.
 
-**TCP 19132 is refused and that is correct.** Bedrock speaks RakNet over
-UDP; there is no TCP listener on that port. The Bedrock port is UDP 19132
-and the Java port is TCP 25565.
+**TCP 19132 is refused and that is correct.** Bedrock speaks over UDP;
+there is no TCP listener on that port. The Bedrock port is UDP 19132 and
+the Java port is TCP 25565.
 
-## 3. Gap one — the Geyser build is behind the Bedrock client
+## 5. Voice: what is actually installable
 
-Geyser tells us this itself, on every start:
+### Bedrock Voice Chat — the Paper plugin gate, re-verified
 
-```
-[14:21:36 INFO]: [Geyser-Spigot] There's a new Geyser update available to
-support Bedrock version 26.66. Download it here: https://geysermc.org/download
-```
+The latest BVC release is **v1.0.0-beta.27** (2 November 2026). Every
+Paper plugin build was downloaded and its `plugin.yml` read directly:
 
-Upstream, the current Geyser supports **Bedrock 26.40–26.65** and Java
-26.3 ([supported versions](https://geysermc.org/wiki/geyser/supported-versions/);
-the download page's latest build is 11/20/2026). Geyser 2.12.1 was the
-first release to accept Bedrock 26.60, and later builds added 26.61–26.65.
+| build | api-version | loads on Paper 1.21.11 |
+|---|---|---|
+| beta.15 | `1.21` | **yes** |
+| beta.16 | `26.2` | no |
+| beta.17 | `26.2` | no |
+| beta.19 | `26.2` | no |
+| beta.20 | `26.2` | no |
+| beta.21 | `26.2` | no |
+| beta.23 | `26.2` | no |
+| beta.25 | `26.2` | no |
+| beta.26 | `26.2` | no |
+| beta.27 | `26.2` | no |
 
-**What this means in practice:** if the iPad has updated to a Bedrock
-version newer than the installed Geyser understands, the connection will be
-refused at the protocol level — the client connects and is turned away,
-which looks to a child like "the server is broken" and is the worst kind of
-failure to debug blind.
+Paper refuses a plugin whose declared api-version is newer than the
+server's. **beta.15 is the newest Bedrock Voice Chat build that will load
+on Paper 1.21.11**, and it is the one to install if we stay on 1.21.11.
 
-**This is the one thing to check on the iPad:** what Bedrock version is it
-on? If it is on 26.66 or newer, Geyser must be updated before the son tries
-to join. Updating Geyser means downloading the current jar, replacing
-`Geyser-Spigot.jar`, and restarting Paper — and a newer Geyser may want a
-newer Paper to go with it, which is a larger job.
+beta.15's own support matrix targets **Bedrock 26.30.x** — exactly the range
+our Geyser speaks — so the two are aligned. The iOS app is distributed
+through TestFlight, not as a release asset:
+`https://testflight.apple.com/join/JSG7bVqC`.
 
-## 4. Gap two — RakNet only, where Bedrock now prefers NetherNet
+Three things are new since April and worth knowing:
 
-The config sets `transport: raknet`. The same config file offers
-`nethernet` and `both`, so **this build supports NetherNet** — it is simply
-not switched on. NetherNet is "the new connection method for Bedrock
-Edition" per Geyser's own comment in that file.
+- **BVC now ships a macOS client** (`bvc-client-macos-arm64.app.zip`). That
+  matters: it means Guardian's speech could be piped *into* the voice space
+  rather than heard through the air of the room.
+- **darwin-arm64 native libraries** are published for the Paper plugin, and
+  the "bundled" plugin jar embeds them.
+- **BVC Registry** — upstream are building a way for players to acquire
+  domain names and TLS certificates through BVC. That could replace the
+  BlackHole-and-admin-password step entirely.
 
-The transport in use must differ from the Bedrock port when both are run in
-parallel, so the change is:
+### VoiceCraft — the option worth evaluating
 
-```yaml
-bedrock:
-  transport: both
-  webrtc-port: 19133      # must differ from 19132
-```
+| | Bedrock players | proximity | extra app |
+|---|---|---|---|
+| Simple Voice Chat | **no, not via Geyser either** | yes | mod on the PC |
+| Bedrock Voice Chat | yes (Paper + Geyser supported) | yes | app on phone or PC |
+| VoiceCraft | yes, **and via Geyser on a Java server** | yes | app on phone or PC |
 
-and UDP 19133 has to be free and reachable.
+VoiceCraft has client apps for Windows, macOS, Linux, Android and iOS, and
+a **GeyserVoice** bridge for Paper that puts Java players and Bedrock
+players in one voice space — the thing Simple Voice Chat can never do on a
+Geyser server, and the thing this server actually is. v1.7.2, stable
+(28 September 2026); the iOS audio bug was fixed in 1.7.1.
 
-**Not changed yet, deliberately.** It cannot be verified until Paper
-restarts, and the agent cannot restart Paper — that is a human step
-(`scripts/restartPaper.sh`). A change to a working server's transport that
-cannot be tested should be made together with the restart and watched, not
-made blind.
+It needs a reachable UDP port per voice adapter, so it is one more port
+either way.
 
-## 5. What was actually blocked, and why
+### What ChatGPT got right, and what it missed
 
-The thing that is *not* installed is the **Bedrock Voice Chat plugin**, and
-that is a voice problem, not a game problem:
+The advice was: *"test the simple version first — Sage plays on the iPad
+and the MacBook's existing Guardian console handles the mic and speaker in
+the same room."*
 
-- Bedrock clients cannot load Java voice mods (Simple Voice Chat is a
-  Fabric/Forge mod). Geyser emulates a vanilla Java client, so a Bedrock
-  player arrives with no voice mod: allowed in, but silent.
-- Bedrock Voice Chat has a Paper plugin that serves Bedrock clients and
-  bridges to Simple Voice Chat for Java clients — one voice system for both.
+That is **correct, and it is already built on our side.** The companion
+app captures on `MacBook Air Microphone` and plays through
+`MacBook Air Speakers`; Guardian's voice is a bot in the same world. Nothing
+needs installing for that test.
 
-Its blockers are real and none of them are about wanting Java only:
+It is also **blocked at the door** by the version chain in §3 — which is
+the thing neither the advice nor the original document knew.
 
-- It needs a **domain and a valid TLS certificate**. Self-signed is
-  refused.
-- It needs **BlackHole** for local DNS, and installing BlackHole needs an
-  admin password.
-- The BVC app has to go on the son's iPad — and **which iPad is the son's is
-  still unknown** ("Chris's iPad (3)" and "Krista's iPad (2)" are both on
-  the network).
+What was missed, in order of how much it matters:
 
-None of that stops the son from *playing*. It stops him from *talking*.
+1. **The Geyser version gap.** The single fact that decides whether any of
+   this works.
+2. **VoiceCraft**, which is a better architectural fit for a Java server
+   than BVC is.
+3. **The macOS client**, and therefore the architecture where Guardian
+   speaks *into* the voice space at its actual position in the world,
+   rather than being heard across a room.
 
 ## 6. The version, for the son
 
@@ -151,8 +230,9 @@ Plain, and true:
 > it needs a proper internet address and a security certificate so that
 > nobody else can listen in.
 >
-> Two small jobs before it works, and neither is anything to do with
-> choosing one over the other:
+> One thing has to be updated first, and it isn't hard: Minecraft on the
+> iPad updated itself, and the piece that connects it to our world hasn't
+> caught up yet. After that, the two small jobs before voice works are:
 >
 > 1. The bridge software is a version behind the newest Minecraft Bedrock.
 >    If your iPad has updated, it has to be updated too — otherwise the
@@ -169,6 +249,9 @@ Plain, and true:
 | Java port 25565 / Bedrock port UDP 19132 | done, verified live |
 | Crossplay confirmed with a real iPad | **never done — no iPad has joined** |
 | Which iPad is the son's | **unknown** ("Chris's iPad (3)" vs "Krista's iPad (2)") |
-| Geyser updated past the Bedrock client version | **not done** — needs the iPad's version first |
-| Transport switched to `both` | **not done** — needs a Paper restart to verify |
-| Bedrock Voice Chat plugin + BlackHole | **not done** — needs TLS + a domain + an admin password + the BVC app on the iPad |
+| What Bedrock version is the iPad on | **unknown** — decides everything below |
+| Paper 1.21.11 → 26.3 migration | **not done** — and the world may not survive it |
+| Geyser updated + `transport: both` + NetherNet | **not done** — needs the Paper bump first |
+| BVC beta.15 (if we stay on 1.21.11) | **not done** — needs TLS + a domain + the app on the iPad |
+| VoiceCraft evaluation | **not done** — arguably the better fit |
+| Bedrock Voice Chat plugin + BlackHole | **not done** — needs TLS + a domain + an admin password |
