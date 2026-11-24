@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  com.guardian.surreal.plist
+
+  SurrealDB, Guardian's memory, as a LaunchAgent.
+
+  WHY THE JOB RESTARTS ONLY AFTER A FAILURE
+
+  KeepAlive is `SuccessfulExit: false`, which means "keep this job alive
+  unless it exited cleanly". That is the difference between "the database
+  died, start it again" and "something else is already serving the port,
+  stand down". runSurreal.sh exits 0 when 8001 is already taken, so this
+  job goes quiet instead of fighting the other server for the port — which
+  is what a plain KeepAlive would do, over and over, every ten seconds.
+
+  WHY IT IS A JOB AT ALL
+
+  The world has to keep running when a coding session ends and when the
+  terminal closes. A child process of either does not.
+-->
+<plist version="1.0">
+  <dict>
+    <key>Label</key>
+    <string>com.guardian.surreal</string>
+
+    <key>ProgramArguments</key>
+    <array>
+      <string>/bin/bash</string>
+      <string>/Users/resonant_jones/Keep/MineCraft_Companion/minecraft-ai-companion/scripts/runSurreal.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/resonant_jones/Keep/MineCraft_Companion/minecraft-ai-companion</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Restart after a crash, but not after a clean exit. -->
+    <key>KeepAlive</key>
+    <dict>
+      <key>SuccessfulExit</key>
+      <false/>
+    </dict>
+
+    <key>LimitLoadToSessionType</key>
+    <array>
+      <string>Aqua</string>
+    </array>
+
+    <key>StandardOutPath</key>
+    <string>/Users/resonant_jones/Keep/MineCraft_Companion/minecraft-ai-companion/.local/logs/surreal.out</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/resonant_jones/Keep/MineCraft_Companion/minecraft-ai-companion/.local/logs/surreal.err</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+  </dict>
+</plist>

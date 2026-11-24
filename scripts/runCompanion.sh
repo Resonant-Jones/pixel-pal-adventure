@@ -44,6 +44,21 @@ export COMPANION_FFMPEG="${COMPANION_FFMPEG:-/opt/homebrew/bin/ffmpeg}"
 
 mkdir -p "$ROOT/.local/logs"
 
+# If a console is already serving the port, stand down cleanly rather than
+# starting a second one that would fight it for the port — and, worse, open
+# the microphone a second time. The launchd job restarts only after a
+# FAILED exit, so exiting 0 here leaves it quiet.
+CONSOLE_PORT="${COMPANION_PORT:-8788}"
+
+# Wait for the port to be free before deciding somebody else owns it — the
+# previous console is often still shutting down. See scripts/portwait.sh.
+source "$ROOT/scripts/portwait.sh"
+
+if ! wait_for_port_free "$CONSOLE_PORT" 20; then
+  echo "companion: a console is still serving $CONSOLE_PORT — leaving it alone."
+  exit 0
+fi
+
 # In the foreground you want to see it. Under launchd there is no terminal to
 # see, so it goes to a log instead of disappearing.
 if [ -t 1 ]; then

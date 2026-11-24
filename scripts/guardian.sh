@@ -1,0 +1,355 @@
+#!/usr/bin/env bash
+#
+# scripts/guardian.sh
+#
+# The `guardian` command.
+#
+# Brings the whole stack up and leaves it up:
+#
+#   SurrealDB   8001   the memory
+#   Paper      25565   the world   (+ Bedrock on UDP 19132)
+#   Guardian    8787   the companion in the world and the control plane
+#   Console     8788   the voice link and the Memory panel
+#
+# It is idempotent: anything already listening is left alone, and anything
+# that is not running is started. Run it as often as you like.
+#
+#   guardian              bring everything up, then print the status
+#   guardian --status     just print the status
+#   guardian --stop       stop the four services
+#   guardian --restart    stop them and bring them up again
+#
+# WHY FOUR LAUNCHD JOBS AND NOT ONE PROCESS
+#
+# The world has to keep running when this terminal closes, and it has to
+# keep running when a coding session ends. So every piece is a launchd job
+# in the GUI session, not a child of this script. `launchctl submit` no
+# longer works on macOS 27.2, so these are real plists.
+#
+# The order matters: SurrealDB first (the agent connects to it at startup),
+# then Paper (the agent joins the world), then the agent, then the console.
+
+set -uo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+DOMAIN="gui/$(id -u)"
+AGENTS_DIR="$HOME/Library/LaunchAgents"
+
+SURREAL_PORT=8001
+MC_PORT=25565
+CONTROL_PORT=8787
+CONSOLE_PORT=8788
+BEDROCK_PORT=19132
+
+LABELS=("com.guardian.surreal" "com.guardian.paper" "com.guardian.agent" "com.guardian.companion")
+
+C_RESET=$'\033[0m'; C_BOLD=$'\033[1m'; C_DIM=$'\033[2m'
+C_GREEN=$'\033[32m'; C_YELLOW=$'\033[33m'; C_CYAN=$'\033[36m'; C_RED=$'\033[31m'
+
+say()  { printf '%s\n' "$*"; }
+log()  { printf '%s[guardian]%s %s\n' "$C_DIM" "$C_RESET" "$*"; }
+ok()   { printf '%s[guardian]%s %s✓%s %s\n' "$C_DIM" "$C_RESET" "$C_GREEN" "$C_RESET" "$*"; }
+warn() { printf '%s[guardian]%s %s!%s %s\n' "$C_DIM" "$C_RESET" "$C_YELLOW" "$C_RESET" "$*"; }
+fail() { printf '%s[guardian]%s %s✗%s %s\n' "$C_DIM" "$C_RESET" "$C_RED" "$C_RESET" "$*" >&2; }
+
+# Is something listening on this port?
+source "$ROOT/scripts/portwait.sh"
+
+port_open() {
+  port_is_open "$1"
+}
+
+# A service is only "already up" if its port stays up. A bound port can be
+# a server that is still dying, and reporting that as healthy leaves the
+# stack with nothing serving it.
+service_is_healthy() {
+  port_stays_open "$1" 3
+}
+
+wait_for_port() {
+  # Each on its own line, on purpose. In a single `local a=1 b=$((a+1))`,
+  # every right-hand side is expanded BEFORE any assignment happens, so the
+  # arithmetic sees the OUTER value — and with `set -u` an unset outer
+  # variable is a fatal "timeout: unbound variable". That one line took the
+  # whole command down on its very first wait.
+  local port="$1"
+  local label="$2"
+  local timeout="${3:-90}"
+  local deadline=$(( SECONDS + timeout ))
+
+  while [ $SECONDS -lt $deadline ]; do
+    if port_open "$port"; then
+      return 0
+    fi
+    sleep 1
+  done
+
+  return 1
+}
+
+# Is this launchd job loaded?
+job_loaded() {
+  launchctl print "$DOMAIN/$1" >/dev/null 2>&1
+}
+
+install_plists() {
+  mkdir -p "$AGENTS_DIR" "$ROOT/.local/logs"
+
+  for label in "${LABELS[@]}"; do
+    local src="$ROOT/scripts/$label.plist"
+    local dst="$AGENTS_DIR/$label.plist"
+
+    if [ ! -f "$src" ]; then
+      warn "missing $src — skipping $label"
+      continue
+    fi
+
+    # Written every run, so a moved checkout or an edited plist takes effect
+    # on the next `guardian`.
+    cp "$src" "$dst"
+  done
+}
+
+# Make sure the job is LOADED, without disturbing anything that is running.
+#
+# A job that is loaded but stood down (its wrapper exited cleanly because
+# something else was already serving the port) still comes back at next
+# login, which is the whole point of installing it. So the job is always
+# bootstrapped — but it is never kicked while something is healthy, because
+# that would drop Guardian out of the world and back in for no reason.
+ensure_job_loaded() {
+  local label="$1"
+
+  if ! job_loaded "$label"; then
+    launchctl bootstrap "$DOMAIN" "$AGENTS_DIR/$label.plist" >/dev/null 2>&1 || {
+      fail "could not bootstrap $label"
+      return 1
+    }
+  fi
+
+  launchctl enable "$DOMAIN/$label" >/dev/null 2>&1 || true
+}
+
+# Start a job that is not currently serving its port.
+start_job() {
+  local label="$1"
+
+  ensure_job_loaded "$label" || return 1
+  launchctl kickstart -k "$DOMAIN/$label" >/dev/null 2>&1 || true
+}
+
+stop_job() {
+  local label="$1"
+  launchctl bootout "$DOMAIN/$label" >/dev/null 2>&1 || true
+  say "  stopped $label"
+}
+
+# The `guardian` command itself, on the PATH.
+install_shim() {
+  local shim="$HOME/.local/bin/guardian"
+
+  mkdir -p "$HOME/.local/bin"
+
+  if [ -f "$shim" ] && grep -q "minecraft-ai-companion" "$shim" 2>/dev/null; then
+    return 0
+  fi
+
+  cat > "$shim" <<EOF
+#!/bin/sh
+# The guardian command — starts the Minecraft companion stack.
+exec "$ROOT/scripts/guardian.sh" "\$@"
+EOF
+
+  chmod +x "$shim"
+  ok "installed the guardian command (~/.local/bin/guardian)"
+}
+
+# The address the iPad should be pointed at.
+#
+# `ipconfig getifaddr` is not usable here — it fails with an os/kern error
+# from a sandboxed shell — so this asks node, which reads the same
+# interfaces without needing the privileged helper. A VPN interface (utun)
+# is not the answer; en0 is.
+lan_address() {
+  node -e '
+    const os = require("os");
+    const interfaces = os.networkInterfaces();
+    const first = (name) => {
+      for (const entry of interfaces[name] || []) {
+        if (entry.family === "IPv4" && !entry.internal) return entry.address;
+      }
+      return null;
+    };
+
+    const preferred = first("en0") || first("en1");
+    if (preferred) {
+      process.stdout.write(preferred);
+      process.exit(0);
+    }
+
+    for (const [name, entries] of Object.entries(interfaces)) {
+      if (name.startsWith("utun") || name.startsWith("awdl") || name.startsWith("llw")) continue;
+      for (const entry of entries || []) {
+        if (entry.family === "IPv4" && !entry.internal) {
+          process.stdout.write(entry.address);
+          process.exit(0);
+        }
+      }
+    }
+  ' 2>/dev/null
+}
+
+print_status() {
+  local lan
+  lan="$(lan_address)"
+
+  say ""
+  say "${C_BOLD}${C_CYAN}  Guardian is live.${C_RESET}"
+  say ""
+
+  local state
+  for entry in "SurrealDB:$SURREAL_PORT" "Minecraft:$MC_PORT" "Guardian:$CONTROL_PORT" "Console:$CONSOLE_PORT"; do
+    state="${entry%%:*}"; local port="${entry##*:}"
+    if port_open "$port"; then
+      ok "$(printf '%-11s' "$state") http://127.0.0.1:$port"
+    else
+      warn "$(printf '%-11s' "$state") not running (port $port)"
+    fi
+  done
+
+  say ""
+  say "  ${C_BOLD}Java / desktop${C_RESET}"
+  say "    connect to  ${C_CYAN}127.0.0.1:$MC_PORT${C_RESET}"
+
+  say ""
+  say "  ${C_BOLD}Bedrock / iPad${C_RESET}"
+  if [ -n "$lan" ]; then
+    say "    Servers → Add Server → ${C_CYAN}$lan${C_RESET}  port ${C_CYAN}$BEDROCK_PORT${C_RESET}"
+    say "    ${C_DIM}via Geyser + Floodgate. No Java account needed.${C_RESET}"
+  else
+    say "    ${C_YELLOW}No LAN address found — the iPad cannot be told where to connect.${C_RESET}"
+  fi
+
+  say ""
+  say "  ${C_DIM}guardian --status    what is running${C_RESET}"
+  say "  ${C_DIM}guardian --stop      stop it all${C_RESET}"
+  say ""
+}
+
+bring_up() {
+  install_shim
+  install_plists
+
+  # SurrealDB. The agent connects to it at startup, so it goes first.
+  if service_is_healthy "$SURREAL_PORT"; then
+    ok "SurrealDB already up on $SURREAL_PORT — leaving it alone."
+    ensure_job_loaded "com.guardian.surreal"
+  else
+    log "starting SurrealDB…"
+    start_job "com.guardian.surreal"
+    if wait_for_port "$SURREAL_PORT" "SurrealDB" 45; then
+      ok "SurrealDB up on $SURREAL_PORT."
+    else
+      fail "SurrealDB did not come up. See $ROOT/.local/logs/surreal.log"
+      return 1
+    fi
+  fi
+
+  # The world. Paper takes 20-60 seconds to boot.
+  if service_is_healthy "$MC_PORT"; then
+    ok "Minecraft server already up on $MC_PORT — leaving it alone."
+    ensure_job_loaded "com.guardian.paper"
+  else
+    log "starting the Minecraft server (this takes 30-60s)…"
+    start_job "com.guardian.paper"
+    if wait_for_port "$MC_PORT" "Minecraft" 150; then
+      ok "Minecraft server up on $MC_PORT."
+    else
+      fail "The Minecraft server did not come up. See $ROOT/.local/logs/paper.log"
+      return 1
+    fi
+  fi
+
+  # The agent in the world.
+  if service_is_healthy "$CONTROL_PORT"; then
+    ok "Guardian already up on $CONTROL_PORT — leaving it alone."
+    ensure_job_loaded "com.guardian.agent"
+  else
+    log "starting Guardian…"
+    start_job "com.guardian.agent"
+    if wait_for_port "$CONTROL_PORT" "Guardian" 60; then
+      ok "Guardian up on $CONTROL_PORT."
+    else
+      fail "Guardian did not come up. See $ROOT/.local/logs/agent.log"
+      return 1
+    fi
+  fi
+
+  # The console.
+  if service_is_healthy "$CONSOLE_PORT"; then
+    ok "Console already up on $CONSOLE_PORT — leaving it alone."
+    ensure_job_loaded "com.guardian.companion"
+  else
+    log "starting the console…"
+    start_job "com.guardian.companion"
+    if wait_for_port "$CONSOLE_PORT" "Console" 45; then
+      ok "Console up on $CONSOLE_PORT."
+    else
+      fail "The console did not come up. See $ROOT/.local/logs/companion.log"
+      return 1
+    fi
+  fi
+}
+
+stop_all() {
+  say ""
+  log "stopping…"
+  for label in "${LABELS[@]}"; do
+    stop_job "$label"
+  done
+  say ""
+}
+
+# Stop everything and uninstall the jobs. The `guardian` command itself is
+# left in place — it is two lines, and leaving it means putting the stack
+# back is just `guardian` again.
+remove_all() {
+  stop_all
+  log "uninstalling the launchd jobs…"
+  for label in "${LABELS[@]}"; do
+    rm -f "$AGENTS_DIR/$label.plist"
+    say "  removed $label.plist"
+  done
+  say ""
+  say "  the guardian command is still in ~/.local/bin/guardian — run it to put it back."
+  say ""
+}
+
+case "${1:-}" in
+  --status)
+    print_status
+    ;;
+  --stop)
+    stop_all
+    ;;
+  --remove)
+    remove_all
+    ;;
+  --restart)
+    stop_all
+    bring_up
+    print_status
+    ;;
+  ""|--start)
+    bring_up
+    print_status
+    ;;
+  -h|--help)
+    sed -n '4,30p' "$0" | sed 's/^# \{0,1\}//'
+    ;;
+  *)
+    fail "unknown option: $1"
+    say "try: guardian --status | --stop | --restart"
+    exit 1
+    ;;
+esac

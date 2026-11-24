@@ -31,6 +31,23 @@ export PATH="/opt/homebrew/bin:/Users/resonant_jones/.local/bin:/usr/local/bin:/
 
 mkdir -p "$ROOT/.local/logs"
 
+# If a Guardian is already serving the control plane, stand down cleanly
+# rather than starting a second copy that would fight it for the port. Two
+# agents sharing a username kick each other forever — every kick triggers a
+# reconnect and every reconnect kicks the other copy, which once produced
+# ~2200 join/leave cycles and a 1.8 MB log. The launchd job is configured to
+# restart only after a FAILED exit, so exiting 0 here leaves it quiet.
+CONTROL_PORT="${GUARDIAN_CONTROL_PORT:-8787}"
+
+# Wait for the port to be free before deciding somebody else owns it — the
+# previous agent is often still shutting down. See scripts/portwait.sh.
+source "$ROOT/scripts/portwait.sh"
+
+if ! wait_for_port_free "$CONTROL_PORT" 20; then
+  echo "agent: a Guardian is still serving $CONTROL_PORT — leaving it alone."
+  exit 0
+fi
+
 # In the foreground you want to see it. Under launchd there is no terminal to
 # see, so it goes to a log instead of disappearing.
 if [ -t 1 ]; then

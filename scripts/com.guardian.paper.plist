@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  com.guardian.paper.plist
+
+  The Minecraft server, as a LaunchAgent.
+
+  KeepAlive is `SuccessfulExit: false`, for the same reason as the SurrealDB
+  job: a crash should bring the world back, but a clean exit — which
+  runPaper.sh does when something is already serving 25565 — should leave
+  the job quiet rather than have it fight for the port every ten seconds.
+
+  Geyser and Floodgate live in minecraft-server/plugins/, so the Bedrock
+  door opens with the same job.
+-->
+<plist version="1.0">
+  <dict>
+    <key>Label</key>
+    <string>com.guardian.paper</string>
+
+    <key>ProgramArguments</key>
+    <array>
+      <string>/bin/bash</string>
+      <string>/Users/resonant_jones/Keep/MineCraft_Companion/minecraft-ai-companion/scripts/runPaper.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/resonant_jones/Keep/MineCraft_Companion/minecraft-ai-companion</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+      <key>SuccessfulExit</key>
+      <false/>
+    </dict>
+
+    <key>LimitLoadToSessionType</key>
+    <array>
+      <string>Aqua</string>
+    </array>
+
+    <key>StandardOutPath</key>
+    <string>/Users/resonant_jones/Keep/MineCraft_Companion/minecraft-ai-companion/.local/logs/paper.out</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/resonant_jones/Keep/MineCraft_Companion/minecraft-ai-companion/.local/logs/paper.err</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+  </dict>
+</plist>

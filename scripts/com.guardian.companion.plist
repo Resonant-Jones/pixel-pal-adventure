@@ -41,13 +41,18 @@
     <key>WorkingDirectory</key>
     <string>/Users/resonant_jones/Keep/MineCraft_Companion/minecraft-ai-companion</string>
 
-    <!-- Start it when the session starts, and keep it alive. A companion
-         that is only up when someone remembers to start it is not a
-         companion. -->
     <key>RunAtLoad</key>
     <true/>
+
+    <!-- Restart after a crash, but stand down after a clean exit.
+         runCompanion.sh exits 0 when a console is already serving the port,
+         so a second copy cannot take turns killing the first — and, worse,
+         open the microphone a second time. -->
     <key>KeepAlive</key>
-    <true/>
+    <dict>
+      <key>SuccessfulExit</key>
+      <false/>
+    </dict>
 
     <!-- Do not fight the user's session: if they log out, it goes with
          them, and it comes back when they log in. -->

@@ -40,8 +40,15 @@
 
     <key>RunAtLoad</key>
     <true/>
+
+    <!-- Restart after a crash, but stand down after a clean exit. runAgent.sh
+         exits 0 when a Guardian is already serving the control plane, so a
+         second copy cannot take turns killing the first. -->
     <key>KeepAlive</key>
-    <true/>
+    <dict>
+      <key>SuccessfulExit</key>
+      <false/>
+    </dict>
 
     <key>LimitLoadToSessionType</key>
     <array>

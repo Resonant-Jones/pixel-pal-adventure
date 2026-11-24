@@ -3804,16 +3804,49 @@ class AgentRuntime {
         snapshot: this.botAdapter.getSnapshot()
       });
 
+      // Shutting down must not throw.
+      //
+      // The database is a peer in this teardown, and it is quite possibly
+      // the thing that is already gone: the machine was restarting the
+      // stack, SurrealDB had been killed, and the writes below failed with
+      // "fetch failed". That exception escaped stop() and became an
+      // unhandled rejection, so the process died with a stack trace and a
+      // non-zero exit instead of shutting down cleanly — and the launchd
+      // job, which restarts after a failed exit, read that as a crash.
+      //
+      // A session that cannot be closed in a database that has gone away is
+      // a session that is over. Say so and carry on.
       if (this.currentWorld?.world_id) {
-        await this.jobStore.pauseRunningJobs(this.currentWorld.world_id);
+        try {
+          await this.jobStore.pauseRunningJobs(this.currentWorld.world_id);
+        } catch (error) {
+          this.logger.warn?.("[agent] Could not pause running jobs during shutdown:", error?.message || error);
+        }
       }
 
       if (this.currentSession?.session_id) {
-        await this.sessionStore.endSession(this.currentSession.session_id);
+        try {
+          await this.sessionStore.endSession(this.currentSession.session_id);
+        } catch (error) {
+          this.logger.warn?.("[agent] Could not close the session during shutdown:", error?.message || error);
+        }
       }
     } finally {
-      await this.botAdapter.disconnect();
-      await this.surrealClient.close();
+      // The teardown itself must not throw either. A shutdown that dies
+      // halfway leaves the bot in the world with no brain, which looks
+      // exactly like a crash to whatever is supervising the process.
+      try {
+        await this.botAdapter.disconnect();
+      } catch (error) {
+        this.logger.warn?.("[agent] Error while disconnecting:", error?.message || error);
+      }
+
+      try {
+        await this.surrealClient.close();
+      } catch (error) {
+        this.logger.warn?.("[agent] Error while closing the database connection:", error?.message || error);
+      }
+
       this.setRuntimeState({
         lifecycle: "stopped"
       });
