@@ -34,9 +34,27 @@ async function fixture(serverName) {
     primaryPlayer: "Panda_Nuggetz",
     messageStore: { storeMessage: async (message) => observed.push(message) },
     eventStore: { recordEvent: async () => {} },
-    logger: { info() {}, warn() {}, error() {} }
+    logger: { info() {}, warn() {}, error() {} },
+    // One attempt, no backoff: the point here is the SHAPE of the failure,
+    // not how long it takes to give up.
+    reconnectConfig: { maxAttempts: 1, baseDelayMs: 0, maxDelayMs: 0 }
   });
-  await assert.rejects(runtime.start(), /fixture connection boundary/);
+
+  // A failed connect must NOT be fatal.
+  //
+  // It used to be, and that broke the watchdog: the pilot watches the
+  // agent's state to find out whether the world is serving, and an agent
+  // that exits on a failed connect takes its own liveness signal with it.
+  // A hung world then looks exactly like a dead agent, and nothing restarts
+  // it. The agent has to survive the world being absent and say so.
+  await runtime.start();
+
+  assert.equal(runtime.runtimeState.lifecycle, "error",
+    "a failed join leaves the agent reporting that it is not in the world");
+  assert.equal(runtime.runtimeState.connectionHealth, "disconnected");
+  assert.equal(runtime.readyForTurns, false,
+    "an agent that is not in the world does not answer turns");
+
   runtime.readyForTurns = true;
   runtime.storeCompanionResponse = async () => {};
   runtime.maybeDistillAdventure = async () => {};

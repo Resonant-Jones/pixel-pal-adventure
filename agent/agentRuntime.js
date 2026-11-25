@@ -2040,13 +2040,103 @@ class AgentRuntime {
     return false;
   }
 
+  // Connect to the world, and keep trying if it is not there.
+  //
+  // This is the same retry budget a mid-session drop uses, reached from a
+  // cold start instead. It matters for one reason: the agent has to be ALIVE
+  // and REPORTING while the world is absent, because that report is the only
+  // thing the pilot has to go on. An agent that exits on a failed connect
+  // takes its own liveness signal with it, and a hung world then looks
+  // exactly like a dead agent.
+  //
+  // The difference from `handleConnectionLoss` is that this one does not
+  // stop the background loops — they have not started yet.
+  async connectWithRetries(reason) {
+    for (let attemptIndex = 1; attemptIndex <= this.reconnectMaxAttempts; attemptIndex += 1) {
+      try {
+        await this.botAdapter.connect();
+        this.setRuntimeState({
+          lifecycle: "ready",
+          connectionHealth: "healthy",
+          reconnectState: {
+            ...this.runtimeState.reconnectState,
+            status: "idle",
+            attemptCount: attemptIndex,
+            lastCompletedAt: new Date().toISOString(),
+            lastErrorCode: null
+          }
+        });
+        return true;
+      } catch (error) {
+        const classification = classifyConnectionError(error || {});
+
+        this.setRuntimeState({
+          lifecycle: attemptIndex >= this.reconnectMaxAttempts ? "error" : "reconnecting",
+          connectionHealth: "disconnected",
+          reconnectState: {
+            ...this.runtimeState.reconnectState,
+            status: attemptIndex >= this.reconnectMaxAttempts ? "failed" : "running",
+            attemptCount: attemptIndex,
+            lastErrorCode: classification.errorCode
+          }
+        });
+
+        this.logger.warn?.(
+          `[agent] could not join the world (attempt ${attemptIndex}/${this.reconnectMaxAttempts}): ${error?.message || error}`
+        );
+
+        const delayMs = this.computeReconnectDelay(attemptIndex);
+        if (delayMs > 0 && attemptIndex < this.reconnectMaxAttempts) {
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
+        }
+      }
+    }
+
+    // Out of attempts. The agent stays alive and keeps answering — it simply
+    // is not in the world, and it says so.
+    this.logger.error?.(
+      `[agent] could not join the world after ${this.reconnectMaxAttempts} attempts. ` +
+        "Staying up so the condition is visible and can be acted on."
+    );
+    return false;
+  }
+
   async start() {
     this.setRuntimeState({
       lifecycle: "starting",
       connectionHealth: "degraded"
     });
     this.#bindEvents();
-    await this.botAdapter.connect();
+
+    // The world may not be there yet, and it may be the thing that is
+    // broken.
+    //
+    // A failed initial connect used to be fatal: the agent exited, launchd
+    // restarted it, it failed again, and the loop went on forever with the
+    // agent never reaching the world and never reporting that it could not.
+    //
+    // That was not just noise. The pilot — the watchdog that notices a hung
+    // server — watches the agent's state, and an agent that is DEAD cannot
+    // report that it is locked out. So the agent has to survive the world
+    // being absent, keep answering on its control plane, and go through the
+    // same reconnect budget it would use for a mid-session drop.
+    //
+    // Only a genuine configuration fault (no .env, no database) should stop
+    // the process, and that still throws.
+    const joined = await this.connectWithRetries("startup");
+
+    if (!joined) {
+      // The world is not there. Everything below needs a world to talk to,
+      // so the agent stops here — but it stays ALIVE, keeps answering on the
+      // control plane, and reports that it is not in the world. That report
+      // is what the pilot acts on.
+      //
+      // The background loops deliberately do NOT start: the reflex worker
+      // and the build worker both need a world. The reconnect loop starts
+      // them itself when it finally gets in.
+      return;
+    }
+
     await this.initializeWorldContext();
     await this.loadActiveIdentity();
     await this.ensureDefaultProfiles();

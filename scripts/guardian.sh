@@ -199,46 +199,21 @@ lan_address() {
   ' 2>/dev/null
 }
 
-# What the AGENT sees of the world: in_world, locked_out, or unknown.
+# What the AGENT sees of the world: in_world, locked_out, recovering, unknown.
 #
-# This is the honest liveness signal. The port being open proves nothing —
-# a Paper server whose main thread has stopped ticking holds the port and
-# answers status pings perfectly while turning every player away. The agent
-# is a player, and it reports the difference.
+# The rule lives in scripts/worldState.js and is asked by running it. It was
+# written inline here once and the two copies disagreed — this one looked for
+# a connectionHealth of "connected", which the agent never reports, so the
+# "the world is serving" branch could never fire.
 agent_world_state() {
   local token
   token="$(grep -m1 '^GUARDIAN_CONTROL_TOKEN=' "$ROOT/.env" 2>/dev/null | cut -d= -f2- | tr -d '"' | tr -d "'")"
 
-  local body
-  body="$(curl -s -m 8 ${token:+-H "Authorization: Bearer $token"} "http://127.0.0.1:$CONTROL_PORT/state" 2>/dev/null)"
-
-  if [ -z "$body" ]; then
-    echo "unknown"
-    return
+  if [ -n "$token" ]; then
+    GUARDIAN_CONTROL_TOKEN="$token" node "$ROOT/scripts/worldState.js" 2>/dev/null
+  else
+    node "$ROOT/scripts/worldState.js" 2>/dev/null
   fi
-
-  local connection
-  connection="$(printf '%s' "$body" | node -e '
-    let d = "";
-    process.stdin.on("data", (c) => (d += c)).on("end", () => {
-      try {
-        const s = JSON.parse(d).state || {};
-        const c = s.connectionHealth;
-        const l = s.lifecycle;
-        if (c === "connected" && l !== "error") {
-          process.stdout.write("in_world");
-        } else if (l === "error" || c === "disconnected" || c === "reconnecting") {
-          process.stdout.write("locked_out");
-        } else {
-          process.stdout.write("unknown");
-        }
-      } catch {
-        process.stdout.write("unknown");
-      }
-    });
-  ' 2>/dev/null)"
-
-  echo "${connection:-unknown}"
 }
 
 print_status() {
@@ -281,9 +256,12 @@ print_status() {
       ok "the world is serving — Guardian is in it"
       ;;
     locked_out)
-      fail "the world is NOT serving — Guardian is alive but locked out."
+      fail "the world is NOT serving — Guardian gave up trying to get in."
       say "    ${C_DIM}The server has stopped ticking. The pilot will restart it;${C_RESET}"
       say "    ${C_DIM}or run 'guardian --restart' now.${C_RESET}"
+      ;;
+    recovering)
+      warn "Guardian is still trying to get in — the world may be starting up."
       ;;
     unknown)
       warn "could not tell whether the world is serving — the agent did not answer"
@@ -325,7 +303,28 @@ bring_up() {
   fi
 
   # The world. Paper takes 20-60 seconds to boot.
-  if service_is_healthy "$MC_PORT"; then
+  #
+  # A PORT CHECK IS NOT ENOUGH HERE. A server whose main thread has stopped
+  # ticking holds the port and answers status pings perfectly, while
+  # turning every player away. So when the agent is already running and
+  # says it is locked out, the world is broken — and the port check is
+  # overruled.
+  #
+  # "unknown" means the agent is not up yet, which is the normal case
+  # during a cold start, and the port check is all there is to go on.
+  local world_state
+  world_state="$(agent_world_state)"
+
+  if [ "$world_state" = "locked_out" ]; then
+    warn "the world is holding its port but not serving — restarting it."
+    start_job "com.guardian.paper"
+    if wait_for_port "$MC_PORT" "Minecraft" 150; then
+      ok "Minecraft server restarted on $MC_PORT."
+    else
+      fail "The Minecraft server did not come back up. See $ROOT/.local/logs/paper.log"
+      return 1
+    fi
+  elif service_is_healthy "$MC_PORT"; then
     ok "Minecraft server already up on $MC_PORT — leaving it alone."
     ensure_job_loaded "com.guardian.paper"
   else

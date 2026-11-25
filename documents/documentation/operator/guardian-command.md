@@ -176,7 +176,8 @@ The rule the pilot implements:
 | the agent | the pilot does |
 |---|---|
 | alive and connected | nothing — the world is fine |
-| alive and locked out | restart Paper after 3 consecutive bad checks |
+| alive and still trying | nothing — it may be a server that is booting |
+| alive and gave up | **nudge it**, and restart the world only if that fails |
 | not answering | nothing — that is the agent's problem, and launchd's job |
 
 It never restarts the agent, and never restarts the world because the agent
@@ -185,6 +186,46 @@ demonstrably locked out.
 
 It runs as its own launchd job, outside the agent's sandbox, because
 restarting a launchd service needs a real user session.
+
+### Two actions, and the order matters
+
+The agent, having exhausted its own reconnect attempts, **stays out**. Its
+reconnect machinery only runs again when something asks it to, and nothing
+does on its own. So the pilot has to ask. But asking and restarting the
+world are very different in weight:
+
+1. **Nudge.** Ask the agent to try again, through the control plane's
+   existing `/command/reconnect`. Cheap. If the world was merely awkward for
+   a moment, this is enough and nothing is disturbed.
+2. **Restart the world.** Only if nudging did not work. Expensive, and the
+   only thing that can fix a server whose main thread has stopped.
+
+Nudging first means a transient hiccup costs one request, and the world is
+only restarted when it is genuinely not serving.
+
+**This is not hypothetical.** On 2026-11-25 the world recovered on its own at
+16:44 — Paper's thread came back — and Guardian still did not come back,
+because it had given up and nothing re-triggered it. The nudge is what closes
+that gap.
+
+### Waiting out a cooldown, out loud
+
+After a restart the pilot will not restart the world again for ten minutes.
+That is there so a world that keeps dying cannot be restarted every minute.
+
+The first version of that wait was silent, and silence is the one thing a
+watchdog must never be. It logged that the world was broken and then said
+nothing at all — which to an operator reading the log is indistinguishable
+from a watchdog that has given up. It now says what it is waiting for and
+how long is left:
+
+```
+[pilot] not restarting yet — the world was restarted 545s ago and the cooldown
+        is 600s. Trying again in 55s.
+```
+
+If you see that line and the world really is down, the fix is
+`guardian --restart`.
 
 ### The status line tells the truth
 

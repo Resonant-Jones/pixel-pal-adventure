@@ -110,9 +110,38 @@ function resolveSupportedMinecraftVersion({
   throw error;
 }
 
-function pingServer({ host, port }) {
+// How long to wait for a server to answer a status ping.
+//
+// THIS MATTERS MORE THAN IT LOOKS.
+//
+// The default is 120 seconds, and that is a disaster for a server whose main
+// thread has stopped ticking. The TCP connection succeeds (the kernel's
+// listen backlog accepts it), the server never replies because the thread
+// that answers status pings is the one that is stuck, and the client waits
+// the full two minutes.
+//
+// Measured against a Paper server frozen exactly the way the 2026-11-25
+// outage froze it: "elapsed: 120066 ms | err: ETIMEDOUT".
+//
+// With five reconnect attempts at two minutes each, the agent's retry budget
+// ran for ten minutes — and during that whole time the watchdog saw "the
+// agent is still trying" and correctly declined to restart the world. The
+// recovery took so long that the world looked fine.
+//
+// Ten seconds is generous for a status ping on a local or LAN server, and
+// it makes the whole chain five times faster.
+const PING_TIMEOUT_MS = 10_000;
+
+// How long the whole join may take: the handshake, the login, and the spawn.
+//
+// This is the deadline on the INITIAL connect. The keepalive timeout covers
+// a bot that has already spawned and then gone quiet; this covers the
+// handshake, which a server that stops answering never finishes.
+const CONNECT_TIMEOUT_MS = 20_000;
+
+function pingServer({ host, port, timeoutMs = PING_TIMEOUT_MS }) {
   return new Promise((resolve, reject) => {
-    ping({ host, port }, (error, response) => {
+    ping({ host, port, closeTimeout: timeoutMs, noPongTimeout: timeoutMs }, (error, response) => {
       if (error) {
         reject(error);
         return;
@@ -410,18 +439,49 @@ class MinecraftBotAdapter extends EventEmitter {
 
     return new Promise((resolve, reject) => {
       let settled = false;
+
+      // A connect that never times out is a connect that never finishes.
+      //
+      // The keepalive timeout covers a bot that HAS spawned and then went
+      // quiet. It does not cover the handshake: a server that accepts the
+      // TCP connection and then stops answering never reaches "spawn", and
+      // never trips the keepalive either. So the connect gets its own
+      // deadline.
+      const connectTimeout = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+
+        try {
+          bot.end("Guardian connect timed out");
+        } catch {
+          // The bot may never have finished setting up. Ending it is
+          // best-effort; the timeout is the outcome that matters.
+        }
+
+        const error = new Error(`Guardian could not join ${this.config.host}:${this.config.port} within ${CONNECT_TIMEOUT_MS}ms.`);
+        error.code = "connect_timeout";
+        reject(error);
+      }, CONNECT_TIMEOUT_MS);
+
       const bot = mineflayer.createBot({
         host: this.config.host,
         port: this.config.port,
         username: this.config.username,
         version: resolvedVersion,
         auth: this.config.auth || "offline"
+        // `checkTimeoutInterval` is deliberately left at its default. It
+        // governs the POST-SPAWN keepalive — how long the server may go
+        // quiet before the bot decides the world froze — and a server under
+        // load can legitimately go quiet for a while. The handshake has its
+        // own deadline above, which is where a frozen server actually
+        // hangs.
       });
 
       this.bot = bot;
       bot.loadPlugin(pathfinder);
       this.#wireLifecycle(bot, reject, () => settled, () => {
         settled = true;
+        clearTimeout(connectTimeout);
       });
 
       bot.once("spawn", () => {
@@ -445,6 +505,7 @@ class MinecraftBotAdapter extends EventEmitter {
 
         if (!settled) {
           settled = true;
+          clearTimeout(connectTimeout);
           resolve(bot);
         }
       });

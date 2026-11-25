@@ -33,17 +33,45 @@
 //
 // The agent is already a player. It is already trying to get in. It already
 // knows the difference between "the world is fine" and "the world is not
-// serving me", and it already reports it: `connectionHealth` and
-// `lifecycle` in the control plane's state.
+// serving me", and it already reports it.
 //
-// The rule this program implements:
+// The rule lives in scripts/worldState.js, because it was written twice
+// before — once here and once inline in guardian.sh — and the two copies
+// disagreed. One of them looked for a connectionHealth of "connected",
+// which this agent never reports.
 //
-//   the agent is ALIVE and cannot join the world  →  the world is broken
+// THE RULE
+//
+//   the agent is ALIVE and gave up trying to get in  →  the world is broken
+//   the agent is ALIVE and still trying              →  leave it alone
 //   the agent is DEAD                                →  launchd's problem
 //
-// Which means this program never restarts the agent, and never restarts
-// Paper because the agent is unhealthy. It only acts when the agent is
-// demonstrably alive and demonstrably locked out.
+// "Still trying" is deliberately separate from "gave up". The agent has a
+// retry budget and it is right to use it: a Paper server that is booting
+// normally leaves the agent reconnecting for thirty seconds, and restarting
+// a healthy server that is still starting would be the pilot causing the
+// outage it is meant to prevent.
+//
+// TWO ACTIONS, AND THE ORDER MATTERS
+//
+// The agent, having exhausted its own reconnect attempts, STAYS OUT. Its
+// reconnect machinery only runs again when something asks it to. Nothing
+// does, on its own.
+//
+// So the pilot has to ask. But asking and restarting the world are very
+// different in weight:
+//
+//   1. NUDGE. Ask the agent to try again, through the control plane's
+//      existing `/command/reconnect`. Cheap. If the world was merely
+//      awkward for a moment, this is enough and nothing is disturbed.
+//
+//   2. RESTART THE WORLD. Only if nudging did not work. This is the
+//      expensive one, and it is the only one that can fix a server whose
+//      main thread has stopped.
+//
+// Doing them in that order matters: nudging first means a transient
+// hiccup costs nothing but a request, and the world is only restarted when
+// it is genuinely not serving.
 //
 // RESTARTING PAPER IS NOT SOMETHING THE AGENT CAN DO
 //
@@ -59,122 +87,381 @@ const ROOT = path.resolve(__dirname, "..");
 
 require("dotenv").config({ path: path.join(ROOT, ".env") });
 
-const CONTROL_URL = `http://127.0.0.1:${process.env.GUARDIAN_CONTROL_PORT || 8787}`;
-const TOKEN = process.env.GUARDIAN_CONTROL_TOKEN || "";
+const { readVerdict } = require("./worldState");
+
 const PAPER_LABEL = "com.guardian.paper";
 const DOMAIN = `gui/${process.env.GUARDIAN_UID || process.getuid()}`;
 
 const CHECK_INTERVAL_MS = 60_000;
-// How many consecutive bad checks before acting. The agent retries on its own
-// schedule, and a single failed check is usually just a server restarting.
-const MISSES_BEFORE_RESTART = 3;
-// After restarting Paper, it needs time to boot and the agent needs time to
-// get back in. Checking during that window would restart it again.
+// How long to let a nudge work before concluding the world is at fault.
+//
+// This has to cover the agent's OWN retry budget, because the nudge starts
+// a fresh one. The agent makes `maxAttempts` attempts (5 by default), each
+// one costing a connect timeout plus a backoff, so its budget runs for a
+// couple of minutes. If the pilot stopped waiting sooner, it would see the
+// agent still "recovering" and stand down — and because the nudge resets
+// that budget, the agent would never reach "locked out" again and the world
+// would never be restarted.
+//
+// Four minutes is that budget plus slack.
+const NUDGE_GRACE_MS = 4 * 60_000;
+// How long to wait for the world to come back and take the agent with it.
+const RECOVERY_TIMEOUT_MS = 5 * 60_000;
+// After a world restart, leave it alone for a while.
 const RESTART_COOLDOWN_MS = 10 * 60_000;
+// Consecutive checks that must agree before an episode starts. One is usually
+// just a server that is restarting.
+const MISSES_BEFORE_ACTION = 2;
 
 let misses = 0;
 let lastRestartAt = 0;
+let episode = null;
 
 function log(message) {
   console.log(`[pilot] ${message}`);
 }
 
-async function readAgentState() {
-  const response = await fetch(`${CONTROL_URL}/state`, {
-    headers: TOKEN ? { Authorization: `Bearer ${TOKEN}` } : {},
-    signal: AbortSignal.timeout(8000)
-  });
+// --- the two actions -------------------------------------------------------
+//
+// Both are separate functions so the whole pilot can be exercised against
+// fakes. The behaviour that matters is the ORDER and the CONDITIONS, and
+// neither is testable if the actions are buried in a loop.
 
-  if (!response.ok) {
-    return { reachable: false, reason: `HTTP ${response.status}` };
-  }
+// Tell the agent to try to get back in.
+//
+// The agent gave up. Its reconnect loop only runs when something asks it to,
+// and the only thing that asks it to is a connection-loss event or this
+// command. Without this the world comes back and Guardian does not, which
+// looks exactly like the watchdog failing.
+async function nudgeAgent(reason = "pilot_world_restarted") {
+  const token = process.env.GUARDIAN_CONTROL_TOKEN || "";
+  const port = process.env.GUARDIAN_CONTROL_PORT || 8787;
 
-  const payload = await response.json();
-  return { reachable: true, state: payload?.state || {} };
-}
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/command/reconnect`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(token ? { Authorization: `Bearer ${token}` } : {})
+      },
+      body: JSON.stringify({ reason }),
+      signal: AbortSignal.timeout(8000)
+    });
 
-// The agent is healthy when it is connected to the world and its lifecycle
-// is not an error. Both signals are checked because they can disagree: a
-// reconnection in progress has a good connection and a stale lifecycle.
-function agentIsLockedOut(state) {
-  const connection = state?.connectionHealth;
-  const lifecycle = state?.lifecycle;
-
-  if (connection === "connected") {
+    const ok = response.status === 200;
+    log(`asked the agent to try again — ${ok ? "ok" : `HTTP ${response.status}`}`);
+    return ok;
+  } catch (error) {
+    log(`could not reach the agent to ask it to try again: ${error?.message || error}`);
     return false;
   }
-
-  return lifecycle === "error" || connection === "disconnected" || connection === "reconnecting";
 }
 
+// Restart the world.
+//
+// This is the expensive action, and it only happens when nudging has failed.
+//
+// Two launchctl steps, because "kickstart" alone is not enough. The job has
+// to be LOADED before it can be kicked, and it is quite possible for it not
+// to be: a server started by hand, a job that was booted out, a machine
+// that came back from a sleep with a half-loaded domain.
+//
+// This is not hypothetical. On 2026-11-25 the pilot detected a hung world,
+// nudged the agent, decided the world was broken, and then tried to restart
+// a job that was not loaded:
+//
+//   could not restart com.guardian.paper: Could not find service
+//   "com.guardian.paper" in domain for user gui: 501
+//
+// So: bootstrap if it is missing, then kickstart. The kickstart is what
+// stops the old instance and starts a new one; the bootstrap is what makes
+// the job exist to be kicked.
 function restartPaper(reason) {
   log(`the world is not serving the agent (${reason}) — restarting ${PAPER_LABEL}`);
 
-  const result = spawnSync("launchctl", ["kickstart", "-k", `${DOMAIN}/${PAPER_LABEL}`], {
+  const domain = DOMAIN;
+
+  if (!jobIsLoaded(domain, PAPER_LABEL)) {
+    const plist = path.join(ROOT, "scripts", `${PAPER_LABEL}.plist`);
+
+    if (!fs.existsSync(plist)) {
+      log(`could not restart ${PAPER_LABEL}: ${plist} is missing`);
+      return false;
+    }
+
+    const bootstrap = spawnSync("launchctl", ["bootstrap", domain, plist], { encoding: "utf8" });
+
+    if (bootstrap.status !== 0) {
+      log(
+        `could not load ${PAPER_LABEL}: ${
+          (bootstrap.stderr || bootstrap.stdout || "").trim() || `exit ${bootstrap.status}`
+        }`
+      );
+      return false;
+    }
+
+    log(`loaded ${PAPER_LABEL}`);
+  }
+
+  const result = spawnSync("launchctl", ["kickstart", "-k", `${domain}/${PAPER_LABEL}`], {
     encoding: "utf8"
   });
 
   if (result.status === 0) {
     log(`restarted ${PAPER_LABEL}`);
-  } else {
-    log(`could not restart ${PAPER_LABEL}: ${(result.stderr || result.stdout || "").trim() || `exit ${result.status}`}`);
+    return true;
   }
 
-  lastRestartAt = Date.now();
-  misses = 0;
+  log(
+    `could not restart ${PAPER_LABEL}: ${
+      (result.stderr || result.stdout || "").trim() || `exit ${result.status}`
+    }`
+  );
+  return false;
 }
 
+// Is this launchd job loaded in the domain?
+function jobIsLoaded(domain, label) {
+  const result = spawnSync("launchctl", ["print", `${domain}/${label}`], { encoding: "utf8" });
+  return result.status === 0;
+}
+
+// --- the recovery episode --------------------------------------------------
+
+// One episode of getting the agent back in.
+//
+//   nudge → wait → if still out, restart the world → wait → nudge → wait
+//
+// The point of nudging first is that it is free, and it fixes the common
+// case where the agent gave up on a world that was merely slow to answer.
+//
+// The dependencies are injectable so the ORDER can be tested without a
+// launchd job and without a running world. That order is the thing worth
+// proving: nudge first, restart only if the nudge did not work.
+async function runEpisode(deps = {}) {
+  const {
+    read: read = readVerdict,
+    nudge = nudgeAgent,
+    restart = restartPaper,
+    now = () => Date.now(),
+    sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    graceMs = NUDGE_GRACE_MS,
+    recoveryMs = RECOVERY_TIMEOUT_MS,
+    cooldownMs = RESTART_COOLDOWN_MS,
+    // When the world was last restarted. Injectable so the cooldown can be
+    // exercised without waiting ten minutes for a real one to expire.
+    getLastRestartAt = () => lastRestartAt,
+    setLastRestartAt = (value) => {
+      lastRestartAt = value;
+    }
+  } = deps;
+
+  const started = now();
+  log("the agent has given up trying to get in — asking it to try once more");
+
+  await nudge("pilot_nudge");
+
+  // Wait for the nudge to finish its story.
+  //
+  // The nudge starts the agent's OWN retry budget, and that budget has two
+  // possible endings: the agent gets back in, or it spends every attempt
+  // and gives up again. Both are worth waiting for.
+  //
+  // "recovering" in the middle means the agent is still working through its
+  // attempts — that is NOT a reason to stop waiting, and it is NOT a reason
+  // to give up on the world either. It is the nudge doing its job.
+  //
+  // The old logic stood down on "recovering", which was a deadlock: the
+  // nudge resets the retry budget, so the agent never reaches "locked out"
+  // again, so the pilot never restarts the world, so the agent stays out.
+  const graceDeadline = now() + graceMs;
+
+  while (now() < graceDeadline) {
+    await sleep(5000);
+
+    const verdict = await read();
+
+    if (verdict.verdict === "in_world") {
+      log("the agent is back in the world — no restart was needed");
+      return { restarted: false, recovered: true };
+    }
+
+    // The agent spent its whole budget and still cannot get in. The world
+    // is what is broken.
+    if (verdict.verdict === "locked_out") {
+      break;
+    }
+  }
+
+  // Re-read after the loop, so the decision uses the latest state.
+  const verdict = await read();
+
+  if (verdict.verdict === "in_world") {
+    log("the agent is back in the world — no restart was needed");
+    return { restarted: false, recovered: true };
+  }
+
+  if (verdict.verdict === "recovering") {
+    // Still working through its attempts when the grace ran out. That is not
+    // a failure and not a success — the next tick will pick this up again.
+    log("the agent is still trying — standing down for now");
+    return { restarted: false, recovered: false };
+  }
+
+  // "unknown" means the agent could not be reached at all — it is not
+  // answering, or another session owns the world. That is NOT evidence that
+  // the world is broken, and restarting it here would be restarting the
+  // wrong thing on no evidence at all.
+  if (verdict.verdict !== "locked_out") {
+    log(`${verdict.verdict} — leaving the world alone`);
+    return { restarted: false, recovered: false };
+  }
+
+  log("the agent is still out — the world is what is broken");
+
+  // The cooldown exists so a world that keeps dying cannot be restarted
+  // every minute. But it must never be a SILENT stand-down: an operator
+  // reading the log has to be able to tell the difference between "the
+  // pilot decided to wait" and "the pilot forgot".
+  //
+  // This is not theoretical. It is what happened on 2026-11-25 at 13:18:40,
+  // when a restart nine minutes earlier was still inside the cooldown: the
+  // pilot logged that the world was broken and then said nothing at all for
+  // four minutes, which looks exactly like a watchdog that has given up.
+  const sinceRestart = now() - getLastRestartAt();
+
+  if (sinceRestart < cooldownMs) {
+    const waitSeconds = Math.ceil((cooldownMs - sinceRestart) / 1000);
+    log(
+      `not restarting yet — the world was restarted ${Math.round(sinceRestart / 1000)}s ago ` +
+        `and the cooldown is ${Math.round(cooldownMs / 1000)}s. Trying again in ${waitSeconds}s.`
+    );
+    return { restarted: false, recovered: false };
+  }
+
+  if (!restart(verdict.reason)) {
+    // The restart failed. Try again on the next tick rather than waiting a
+    // full cooldown for a failure that may have been transient.
+    return { restarted: false, recovered: false };
+  }
+
+  setLastRestartAt(now());
+
+  // The world needs time to boot. Nudge again once it is up — but do not
+  // hammer the endpoint while Paper is still starting.
+  const recoveryDeadline = now() + recoveryMs;
+
+  while (now() < recoveryDeadline) {
+    await sleep(5000);
+
+    const state = await read();
+
+    if (state.verdict === "in_world") {
+      log("the world is back and the agent is in it");
+      return { restarted: true, recovered: true };
+    }
+
+    // Keep nudging, but not in a tight loop — the agent's own reconnect
+    // takes a while, and hammering the endpoint would just queue reconnects.
+    //
+    // Nudge on "locked_out" and on "recovering" both. After a restart the
+    // agent is usually "recovering" — it is working through a fresh retry
+    // budget against a world that is still booting — and waiting for it to
+    // reach "locked_out" first would waste the whole budget before it ever
+    // tried the new server.
+    if (state.verdict === "locked_out" || state.verdict === "recovering") {
+      await nudge("pilot_world_restarted");
+    }
+  }
+
+  log(`the world came back but the agent has not rejoined yet (${Math.round((now() - started) / 1000)}s)`);
+  return { restarted: true, recovered: false };
+}
+
+// --- the main loop ---------------------------------------------------------
+
 async function tick() {
-  let reading;
-
-  try {
-    reading = await readAgentState();
-  } catch (error) {
-    // The agent is not answering. That is the agent's problem, and launchd's
-    // job for it — restarting the world because the agent is down would be
-    // restarting the wrong thing.
-    log(`the agent is not answering (${error?.message || error}) — leaving the world alone`);
-    misses = 0;
+  // Do not start a second episode while one is running.
+  if (episode) {
     return;
   }
 
-  if (!reading.reachable) {
-    log(`the agent's control plane is not reachable (${reading.reason}) — leaving the world alone`);
-    misses = 0;
-    return;
-  }
+  const verdict = await readVerdict();
 
-  const state = reading.state;
-
-  if (!agentIsLockedOut(state)) {
+  if (verdict.verdict === "in_world") {
     if (misses > 0) {
-      log(`the agent is back in the world`);
+      log("the agent is back in the world");
       misses = 0;
     }
     return;
   }
 
+  if (verdict.verdict === "recovering") {
+    // The agent is still trying to get in. A server that is booting looks
+    // exactly like this. Leave it alone.
+    if (misses > 0) {
+      log(`the agent is back to trying (${verdict.reason})`);
+      misses = 0;
+    }
+    return;
+  }
+
+  if (verdict.verdict === "unknown") {
+    // The agent is not answering, or another session owns the world. Either
+    // way it is not the world's fault, and restarting the world would be
+    // restarting the wrong thing.
+    log(`${verdict.reason} — leaving the world alone`);
+    misses = 0;
+    return;
+  }
+
+  // locked_out.
   misses += 1;
-  log(`the agent is alive but locked out (${misses}/${MISSES_BEFORE_RESTART}) — connection=${state.connectionHealth} lifecycle=${state.lifecycle}`);
+  log(`the agent gave up trying to get in (${misses}/${MISSES_BEFORE_ACTION}) — ${verdict.reason}`);
 
-  if (misses < MISSES_BEFORE_RESTART) {
+  if (misses < MISSES_BEFORE_ACTION) {
     return;
   }
 
-  if (Date.now() - lastRestartAt < RESTART_COOLDOWN_MS) {
-    return;
-  }
+  misses = 0;
 
-  restartPaper(`connection=${state.connectionHealth} lifecycle=${state.lifecycle}`);
+  episode = runEpisode().catch((error) => {
+    log(`the recovery attempt failed: ${error?.message || error}`);
+    return { restarted: false, recovered: false };
+  });
+
+  await episode;
+  episode = null;
 }
 
-log(`watching the world through the agent — checking every ${CHECK_INTERVAL_MS / 1000}s`);
+async function main() {
+  log(`watching the world through the agent — checking every ${CHECK_INTERVAL_MS / 1000}s`);
 
-(async () => {
   // Give the agent a moment to come up before judging it.
   await new Promise((resolve) => setTimeout(resolve, 30_000));
   await tick();
+
   setInterval(() => {
     tick().catch((error) => log(`check failed: ${error?.message || error}`));
   }, CHECK_INTERVAL_MS);
-})();
+}
+
+if (require.main === module) {
+  main().catch((error) => {
+    log(`the pilot stopped: ${error?.message || error}`);
+    process.exit(1);
+  });
+}
+
+module.exports = {
+  nudgeAgent,
+  restartPaper,
+  runEpisode,
+  tick,
+  DOMAIN,
+  PAPER_LABEL,
+  MISSES_BEFORE_ACTION,
+  NUDGE_GRACE_MS,
+  RECOVERY_TIMEOUT_MS,
+  RESTART_COOLDOWN_MS
+};

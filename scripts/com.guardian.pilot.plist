@@ -31,8 +31,8 @@
 
     <key>ProgramArguments</key>
     <array>
-      <string>/opt/homebrew/bin/node</string>
-      <string>/Users/resonant_jones/Keep/MineCraft_Companion/minecraft-ai-companion/scripts/pilot.js</string>
+      <string>/bin/bash</string>
+      <string>/Users/resonant_jones/Keep/MineCraft_Companion/minecraft-ai-companion/scripts/runPilot.sh</string>
     </array>
 
     <key>WorkingDirectory</key>
