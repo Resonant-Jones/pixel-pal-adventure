@@ -103,8 +103,25 @@ const CHECK_INTERVAL_MS = 60_000;
 // that budget, the agent would never reach "locked out" again and the world
 // would never be restarted.
 //
-// Four minutes is that budget plus slack.
-const NUDGE_GRACE_MS = 4 * 60_000;
+// Four minutes was that budget plus slack, and the slack turned out to be
+// too thin.
+//
+// Measured on 2026-11-25 against a Paper server frozen with SIGSTOP: the
+// agent's budget after a nudge ran 2m32s (five attempts at ~30s each — a
+// status ping that times out at 10s, plus a handshake that times out at
+// 20s). The theoretical worst case, with the backoff jittered to its
+// maximum, is 4m04s — which is LONGER than the four-minute grace.
+//
+// And that is not a cosmetic overrun. If the grace expires while the agent
+// is still "recovering", the pilot stands down. The next episode nudges
+// again, which resets the budget, which puts the agent back in
+// "recovering". The deadlock this whole design exists to avoid comes
+// straight back, and it comes back silently.
+//
+// Six minutes puts a full minute of slack under the worst case. It costs
+// nothing in the normal path, because the wait ends the moment the agent
+// gives up rather than running to the full grace.
+const NUDGE_GRACE_MS = 6 * 60_000;
 // How long to wait for the world to come back and take the agent with it.
 const RECOVERY_TIMEOUT_MS = 5 * 60_000;
 // After a world restart, leave it alone for a while.

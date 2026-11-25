@@ -253,13 +253,33 @@ async function testTheGraceIsLongEnoughForTheRetryBudget() {
   // One attempt costs the status ping, and — if the ping answers but the
   // handshake does not — the connect as well. Take the worse case.
   const attemptMs = pingTimeout + connectTimeout;
-  const budgetMs = maxAttempts * (attemptMs + maxDelay);
+
+  // And the backoff is jittered, so the WORST case is not maxDelay — it is
+  // maxDelay plus the jitter, which is a quarter of it.
+  const jitter = Number((agentSource.match(/reconnectJitter = reconnectConfig\.jitter \?\? ([\d.]+)/) || [])[1]);
+  const worstDelay = maxDelay * (1 + jitter);
+  const budgetMs = maxAttempts * (attemptMs + worstDelay);
 
   const grace = Number((source.match(/const NUDGE_GRACE_MS = (\d+) \* 60_000/) || [])[1]);
   assert.ok(
     grace * 60_000 > budgetMs,
     `the grace period (${grace * 60_000}ms) must exceed the agent's retry budget (${budgetMs}ms), ` +
       "or the pilot stands down before the agent can finish trying"
+  );
+
+  // And it must exceed it by a MARGIN, not by a hair.
+  //
+  // Measured on 2026-11-25 against a frozen server, the agent's budget after
+  // a nudge ran 2m32s. The theoretical worst case is 4m04s, and the grace
+  // used to be four minutes — so on a slower machine, or with the backoff
+  // jittered up, the grace would expire while the agent was still
+  // "recovering". The pilot would then stand down, the next episode would
+  // nudge again, and the deadlock the whole design exists to avoid would
+  // come back — silently.
+  assert.ok(
+    grace * 60_000 - budgetMs >= 60_000,
+    `the grace period (${grace * 60_000}ms) must exceed the agent's worst-case retry budget ` +
+      `(${budgetMs}ms) by at least a minute, or a slow machine reintroduces the deadlock`
   );
 }
 
