@@ -435,7 +435,7 @@ input rather than coming out of the speakers.
 | 5 | Install BlackHole | me | `brew install blackhole-2ch`, then wire the device in Audio MIDI Setup. **This needs an admin password — it is the step the agent sandbox cannot take.** |
 | 6 | Point the companion app at BlackHole | me | One line in `.env`: `COMPANION_AUDIO_OUTPUT=BlackHole 2ch`, then restart the app. |
 | 7 | Install the voice client on his clients | **you** | Java desktop: the Simple Voice Chat mod. iPad: the BVC app from TestFlight. |
-| 8 | **Which iPad is his?** | **you** | Two are connected: "Chris's iPad (3)" (iPad mini A17 Pro) and "Krista's iPad (2)" (iPad Pro 12.9). The BVC app has to go on the right one. |
+| 8 | **Which iPad is his?** | **answered** | It is **Cyber-Portal** (`192.168.4.157` on this network). The BVC app goes on that one. |
 | 9 | The first spoken conversation | both of you | The acceptance test. **The two-way loop is now proven end to end** (§4, the voice check, 10/10). What has not happened is the son hearing it, because the transport needs steps 1–5 and 7. |
 
 Steps 4, 7 and 8 need you. Everything else is mine.

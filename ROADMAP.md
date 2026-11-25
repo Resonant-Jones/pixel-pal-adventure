@@ -421,8 +421,10 @@ plugin is never a listener.
 The transport. The last hop needs a domain and a valid certificate, the BVC
 and Simple Voice Chat Paper plugins, BlackHole (which needs an admin
 password), and the voice client on the son's iPad. **Which iPad is his** is
-still unanswered — "Chris's iPad (3)" and "Krista's iPad (2)" are both
-connected.
+answered: it is **Cyber-Portal**, `192.168.4.157` on this network. What is
+still unknown is the Bedrock version it runs, and that is now measurable
+rather than a guess — see `documents/documentation/architecture/bedrock-crossplay.md`
+§7a.
 
 What has been proven is everything before that hop. What has not happened is
 the son hearing it.

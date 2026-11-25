@@ -2,6 +2,21 @@
 
 This repository is split between a Node.js agent runtime, a Mineflayer Minecraft edge, a SurrealDB persistence layer, and a Tauri dashboard. Start with the runtime bootstrap, then follow the orchestration path into the bot adapter, memory stores, and model clients. For a fast project orientation, see [README](../../README.md).
 
+## The Notion mirror
+
+Notion is the continuity layer for this work, so a later session can pick it up
+without re-deriving it. The repo is the source of truth; these pages mirror it.
+
+- **[Guardian — Minecraft Companion](https://app.notion.com/p/423beb70dda9819ca55bebeea7442a48)** — the hub: what the companion is, the open items, and the bugs worth remembering.
+- [The Guardian Command and the World Watchdog](https://app.notion.com/p/423beb70dda981e5956bfaad6fd9f8a8) — `guardian`, and the pilot that brings the world back when it stops serving.
+- [The Embedder Picker](https://app.notion.com/p/423beb70dda98157bd1dc06d48e37ddb) — the memory architecture.
+- [The Microphone Watchdog](https://app.notion.com/p/423beb70dda98188828ede8f988c5904) — keeping the system microphone honest.
+- [Bedrock Crossplay](https://app.notion.com/p/423beb70dda9810491cfd1dd20cc8643) — what is installed, and the version gaps.
+
+The mirror is generated from the documents by `.local/notion-payload.js`, in two
+passes: the hub first, then its children under the hub's id, then a second pass
+that replaces the hub's placeholder links with mentions of the real pages.
+
 ## Start Reading Here
 
 1. `scripts/startAgent.js`

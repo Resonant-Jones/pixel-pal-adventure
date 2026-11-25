@@ -316,14 +316,48 @@ Plain, and true:
 | Geyser + Floodgate installed and listening | done, verified live |
 | Java port 25565 / Bedrock port UDP 19132 | done, verified live |
 | Crossplay confirmed with a real iPad | **never done — no iPad has joined** |
-| Which iPad is the son's | **unknown** ("Chris's iPad (3)" vs "Krista's iPad (2)") |
-| What Bedrock version is the iPad on | **unknown** — decides whether the migration is needed at all |
+| Which iPad is the son's | **answered** — it is **Cyber-Portal**, on this network at `192.168.4.157` |
+| What Bedrock version is the iPad on | **still unknown, and now measurable** — see below |
 | The world survives Paper 26.3 | **done — verified by running it on a copy** |
 | The bot can follow the server | **NOT yet — blocked by a one-version upstream gap** |
 | Geyser updated + `transport: both` + NetherNet | **not done** — needs the Paper bump first |
 | BVC beta.15 (if we stay on 1.21.11) | **not done** — needs TLS + a domain + the app on the iPad |
 | VoiceCraft evaluation | **not done** — arguably the better fit |
 | Bedrock Voice Chat plugin + BlackHole | **not done** — needs TLS + a domain + an admin password |
+
+### 7a. The iPad is Cyber-Portal, and its version can now be read
+
+The son's iPad is **Cyber-Portal**. It resolves on this network to
+`192.168.4.157`:
+
+```bash
+dns-sd -G v4 "Cyber-Portal.local"
+```
+
+The version question — the one that decides whether the Paper 26.3 /
+Geyser / NetherNet migration is needed at all — turns out to be
+**measurable** rather than something that has to be read off the screen.
+
+A Bedrock client answers a RakNet "unconnected ping" on UDP 19133 with an
+"unconnected pong" whose MOTD string carries both the protocol number and
+the game version:
+
+```bash
+node scripts/bedrockPing.js 192.168.4.157
+```
+
+Verified working against Geyser itself, which answers with the same
+shape:
+
+```
+{"from":"127.0.0.1:19132","edition":"MCPE","protocol":"2193","version":"26.52"}
+```
+
+The iPad did not answer during testing on 2026-11-25 — the client only
+listens while Minecraft is actually running on it. **Open Minecraft on
+Cyber-Portal, leave it on the title screen, and the version comes back in
+one UDP round trip.** That turns the biggest unknown in this document
+into a ten-second measurement.
 
 ## 8. Two test servers are still running
 
