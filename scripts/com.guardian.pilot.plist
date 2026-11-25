@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  com.guardian.pilot.plist
+
+  The pilot: something that notices when the world has stopped serving.
+
+  WHY THIS EXISTS
+
+  A Minecraft server can stop ticking without exiting. Paper's own watchdog
+  notices and writes a thread dump; the server thread stays parked forever;
+  the JVM stays alive holding the port. launchd cannot see that, because
+  `KeepAlive` restarts a job that EXITS and this job never exits.
+
+  On 2026-11-25 that left the world down from 01:48 to 10:30. Every port
+  was open. The console connected the whole time. Guardian was simply
+  turned away at the door, and nothing in the system was watching for that.
+
+  A status ping cannot detect it — the server-list request is served off the
+  main thread and answers perfectly on a server that cannot let anyone in.
+  So the pilot watches through the agent: if the agent is alive and cannot
+  join, the world is what is broken.
+
+  It runs as its own job, outside the agent's sandbox, because restarting a
+  launchd service needs a real user session.
+-->
+<plist version="1.0">
+  <dict>
+    <key>Label</key>
+    <string>com.guardian.pilot</string>
+
+    <key>ProgramArguments</key>
+    <array>
+      <string>/opt/homebrew/bin/node</string>
+      <string>/Users/resonant_jones/Keep/MineCraft_Companion/minecraft-ai-companion/scripts/pilot.js</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/resonant_jones/Keep/MineCraft_Companion/minecraft-ai-companion</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- If the pilot itself dies, bring it back. Unlike Paper, a dead pilot
+         is a visible failure. -->
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>LimitLoadToSessionType</key>
+    <array>
+      <string>Aqua</string>
+    </array>
+
+    <key>StandardOutPath</key>
+    <string>/Users/resonant_jones/Keep/MineCraft_Companion/minecraft-ai-companion/.local/logs/pilot.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/resonant_jones/Keep/MineCraft_Companion/minecraft-ai-companion/.local/logs/pilot.err</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+  </dict>
+</plist>

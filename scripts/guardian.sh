@@ -41,7 +41,7 @@ CONTROL_PORT=8787
 CONSOLE_PORT=8788
 BEDROCK_PORT=19132
 
-LABELS=("com.guardian.surreal" "com.guardian.paper" "com.guardian.agent" "com.guardian.companion")
+LABELS=("com.guardian.surreal" "com.guardian.paper" "com.guardian.agent" "com.guardian.companion" "com.guardian.pilot")
 
 C_RESET=$'\033[0m'; C_BOLD=$'\033[1m'; C_DIM=$'\033[2m'
 C_GREEN=$'\033[32m'; C_YELLOW=$'\033[33m'; C_CYAN=$'\033[36m'; C_RED=$'\033[31m'
@@ -199,6 +199,48 @@ lan_address() {
   ' 2>/dev/null
 }
 
+# What the AGENT sees of the world: in_world, locked_out, or unknown.
+#
+# This is the honest liveness signal. The port being open proves nothing —
+# a Paper server whose main thread has stopped ticking holds the port and
+# answers status pings perfectly while turning every player away. The agent
+# is a player, and it reports the difference.
+agent_world_state() {
+  local token
+  token="$(grep -m1 '^GUARDIAN_CONTROL_TOKEN=' "$ROOT/.env" 2>/dev/null | cut -d= -f2- | tr -d '"' | tr -d "'")"
+
+  local body
+  body="$(curl -s -m 8 ${token:+-H "Authorization: Bearer $token"} "http://127.0.0.1:$CONTROL_PORT/state" 2>/dev/null)"
+
+  if [ -z "$body" ]; then
+    echo "unknown"
+    return
+  fi
+
+  local connection
+  connection="$(printf '%s' "$body" | node -e '
+    let d = "";
+    process.stdin.on("data", (c) => (d += c)).on("end", () => {
+      try {
+        const s = JSON.parse(d).state || {};
+        const c = s.connectionHealth;
+        const l = s.lifecycle;
+        if (c === "connected" && l !== "error") {
+          process.stdout.write("in_world");
+        } else if (l === "error" || c === "disconnected" || c === "reconnecting") {
+          process.stdout.write("locked_out");
+        } else {
+          process.stdout.write("unknown");
+        }
+      } catch {
+        process.stdout.write("unknown");
+      }
+    });
+  ' 2>/dev/null)"
+
+  echo "${connection:-unknown}"
+}
+
 print_status() {
   local lan
   lan="$(lan_address)"
@@ -220,6 +262,33 @@ print_status() {
   say ""
   say "  ${C_BOLD}Java / desktop${C_RESET}"
   say "    connect to  ${C_CYAN}127.0.0.1:$MC_PORT${C_RESET}"
+
+  # Is the world actually SERVING, or just holding the port?
+  #
+  # A Minecraft server can stop ticking without exiting. Its JVM stays
+  # alive, the port stays open, and a status ping answers perfectly — while
+  # not a single player can get in. A port check cannot tell that apart
+  # from a healthy server.
+  #
+  # The agent can: it is a player, it is trying to get in, and it reports
+  # the difference. So the status line below is the agent's view of the
+  # world, not a guess from the outside.
+  local world_state
+  world_state="$(agent_world_state)"
+
+  case "$world_state" in
+    in_world)
+      ok "the world is serving — Guardian is in it"
+      ;;
+    locked_out)
+      fail "the world is NOT serving — Guardian is alive but locked out."
+      say "    ${C_DIM}The server has stopped ticking. The pilot will restart it;${C_RESET}"
+      say "    ${C_DIM}or run 'guardian --restart' now.${C_RESET}"
+      ;;
+    unknown)
+      warn "could not tell whether the world is serving — the agent did not answer"
+      ;;
+  esac
 
   say ""
   say "  ${C_BOLD}Bedrock / iPad${C_RESET}"
@@ -299,6 +368,15 @@ bring_up() {
       return 1
     fi
   fi
+
+  # The pilot: the thing that notices when the world stops serving.
+  #
+  # It goes last on purpose. It watches the agent, so it has nothing to say
+  # until the agent is up — and it is the one job here that can restart
+  # another one, so it wants everything else settled first.
+  ensure_job_loaded "com.guardian.pilot"
+  launchctl kickstart -k "$DOMAIN/com.guardian.pilot" >/dev/null 2>&1 || true
+  ok "Pilot watching — it restarts the world if the agent gets locked out."
 }
 
 stop_all() {

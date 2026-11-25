@@ -124,8 +124,80 @@ The install has to run **outside the agent's sandbox**, because it writes to
 cannot be installed at all.
 
 `guardian` installs its own shim into `~/.local/bin` on first run, and
-refreshes the four plists every time so an edited plist or a moved checkout
+refreshes the five plists every time so an edited plist or a moved checkout
 takes effect on the next `guardian`.
+
+## 5a. The pilot — the job that notices when the world stops
+
+**`com.guardian.pilot`** (`scripts/pilot.js`) watches the world through the
+agent and restarts it if the agent is alive but cannot get in.
+
+### Why it exists
+
+On 2026-11-25 the world went down at 01:48 and stayed down for nearly nine
+hours. Paper's own watchdog noticed —
+
+```
+[02:18:47 ERROR]: The server has not responded for -5 seconds! Creating thread dump
+[02:18:50 ERROR]: Current Thread: Server thread
+[02:18:50 ERROR]:   State: TIMED_WAITING
+[02:18:50 ERROR]:   net.minecraft.server.MinecraftServer.runServer
+[02:18:50 ERROR]:   net.minecraft.server.MinecraftServer.recordTaskExecutionTimeWhileWaiting
+```
+
+— and then the server thread stayed parked forever. The JVM was still alive
+and still holding port 25565.
+
+**launchd could not see that.** `KeepAlive` restarts a job that *exits*, and
+this job never exited. So every port stayed open, the console connected the
+whole time, Guardian was simply turned away at the door, and nothing in the
+system was watching for that.
+
+### Why a status ping cannot detect it
+
+The server-list request is served **off** the main server thread, so it
+answers perfectly on a server that cannot let a single player in. Verified
+on the hung server:
+
+```
+PING OK -> version: Paper 1.21.11 players: 0
+```
+
+A world that no one could enter answered the ping without complaint.
+
+### So the probe is the agent
+
+The agent is already a player. It is already trying to get in. It already
+reports the difference, in `connectionHealth` and `lifecycle` on the control
+plane's `/state`.
+
+The rule the pilot implements:
+
+| the agent | the pilot does |
+|---|---|
+| alive and connected | nothing — the world is fine |
+| alive and locked out | restart Paper after 3 consecutive bad checks |
+| not answering | nothing — that is the agent's problem, and launchd's job |
+
+It never restarts the agent, and never restarts the world because the agent
+is unhealthy. It only acts when the agent is demonstrably alive and
+demonstrably locked out.
+
+It runs as its own launchd job, outside the agent's sandbox, because
+restarting a launchd service needs a real user session.
+
+### The status line tells the truth
+
+`guardian --status` now reports the world from the agent's view, not from a
+port check:
+
+```
+[guardian] ✓ Minecraft   http://127.0.0.1:25565
+[guardian] ✗ the world is NOT serving — Guardian is alive but locked out.
+```
+
+The first line says the port is open. The second says whether that means
+anything. They disagree exactly when the server has stopped ticking.
 
 ## 6. Where the logs are
 
@@ -135,6 +207,8 @@ takes effect on the next `guardian`.
 .local/logs/paper.log       the older server's log, from before it was a job
 .local/logs/agent.log       Guardian
 .local/logs/companion.log   the console
+.local/logs/pilot.log       the pilot
+.local/logs/pilot.err       the pilot's errors
 ```
 
 `paper.out` and `paper.log` are both Paper logs; the split is because the
