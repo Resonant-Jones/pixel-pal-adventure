@@ -17,7 +17,7 @@
     "companion": "node scripts/startCompanion.js",
     "companion:check": "node scripts/startCompanion.js --check",
     "bedrock:ping": "node scripts/bedrockPing.js",
-    "check:shell": "bash -n scripts/guardian.sh && bash -n scripts/runSurreal.sh && bash -n scripts/runPaper.sh && bash -n scripts/runAgent.sh && bash -n scripts/runCompanion.sh && bash -n scripts/installLaunchAgents.sh && bash -n scripts/portwait.sh && bash -n scripts/buildInputGuard.sh && bash -n scripts/runPilot.sh"
+    "check:shell": "bash -n scripts/guardian.sh && bash -n scripts/runSurreal.sh && bash -n scripts/runPaper.sh && bash -n scripts/runAgent.sh && bash -n scripts/runCompanion.sh && bash -n scripts/installLaunchAgents.sh && bash -n scripts/portwait.sh && bash -n scripts/buildInputGuard.sh && bash -n scripts/runPilot.sh && bash -n scripts/watchBedrock.sh && bash -n scripts/runBedrockWatch.sh"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.10.1",

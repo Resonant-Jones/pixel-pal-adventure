@@ -41,6 +41,16 @@ It is a two-line shim; the real thing is `scripts/guardian.sh` in the repo.
 They are started in that order, because each depends on the one before it:
 the agent connects to the database at startup, and joins the world.
 
+Two more jobs run alongside them, and they are not services — nothing listens
+on a port for either:
+
+| job | what it is | launchd label |
+|---|---|---|
+| the pilot | notices when the world stops serving and restarts it | `com.guardian.pilot` |
+| the Bedrock watcher | waits for the iPad to join, and says so every 30s | `com.guardian.bedrockwatch` |
+
+The pilot is covered in §5a. The watcher is covered in §5b.
+
 **Why launchd and not one process.** The world has to keep running when the
 terminal closes and when a coding session ends. A child of either does not.
 `launchctl submit` — the way this used to be started — no longer works on
@@ -240,16 +250,61 @@ port check:
 The first line says the port is open. The second says whether that means
 anything. They disagree exactly when the server has stopped ticking.
 
+## 5b. The Bedrock watcher — the job that waits for the iPad
+
+**`com.guardian.bedrockwatch`** (`scripts/watchBedrock.sh`) watches the server
+log for anything Bedrock-shaped: Geyser's accept and refuse lines,
+Floodgate's, any player join, any disconnect.
+
+It exists because the crossplay question has never been answered, and
+because the thing waiting for the answer has to outlive whatever is doing
+the waiting. It started as a background task in an agent session, which
+died every hour and had to be re-armed — and a watcher whose lifetime is
+shorter than the thing it waits for is not a watcher.
+
+**The refusals are the interesting part.** They say *why* a client was turned
+away, and that is the difference between "the version is too new" and "the
+transport is wrong". Two gates are known already:
+
+- Geyser 2.11.3 emulates Bedrock 26.52. Its own boot log says *"there's a new
+  Geyser update available to support Bedrock version 26.66"*. A client on
+  26.66 is refused at the protocol level, and it looks like a broken server.
+- The installed config is `transport: raknet` with `webrtc-port: 0`, so
+  **TCP 19132 is refused** — the NetherNet signalling port is not open at
+  all.
+
+**It says when it is alive.** Every match is appended to
+`.local/logs/bedrock-watch.log`, and a heartbeat line is appended every 30
+seconds. A watcher that reports "nothing happened" has to be able to report
+"I am still watching" with the same confidence — otherwise a dead pipeline
+and a quiet server look identical.
+
+To read the iPad's version without opening anything on it:
+
+```bash
+node scripts/bedrockPing.js 192.168.4.157
+```
+
+A Bedrock client answers a RakNet unconnected ping on UDP 19133 with its
+protocol number and game version. The client only listens while Minecraft
+is actually running on the device, so **open Minecraft on Cyber-Portal and
+leave it on the title screen** — then the version comes back in one round
+trip.
+
+It never touches the world. It only reads the log.
+
 ## 6. Where the logs are
 
 ```
-.local/logs/surreal.out     SurrealDB
-.local/logs/paper.out       the Minecraft server (this is the launchd job's)
-.local/logs/paper.log       the older server's log, from before it was a job
-.local/logs/agent.log       Guardian
-.local/logs/companion.log   the console
-.local/logs/pilot.log       the pilot
-.local/logs/pilot.err       the pilot's errors
+.local/logs/surreal.out        SurrealDB
+.local/logs/paper.out          the Minecraft server (this is the launchd job's)
+.local/logs/paper.log          the older server's log, from before it was a job
+.local/logs/agent.log          Guardian
+.local/logs/companion.log      the console
+.local/logs/pilot.log          the pilot
+.local/logs/pilot.err          the pilot's errors
+.local/logs/bedrock-watch.log  the Bedrock watcher (matches and heartbeats)
+.local/logs/bedrockwatch.err   the watcher's errors
 ```
 
 `paper.out` and `paper.log` are both Paper logs; the split is because the

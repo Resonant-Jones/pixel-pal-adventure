@@ -41,7 +41,7 @@ CONTROL_PORT=8787
 CONSOLE_PORT=8788
 BEDROCK_PORT=19132
 
-LABELS=("com.guardian.surreal" "com.guardian.paper" "com.guardian.agent" "com.guardian.companion" "com.guardian.pilot")
+LABELS=("com.guardian.surreal" "com.guardian.paper" "com.guardian.agent" "com.guardian.companion" "com.guardian.pilot" "com.guardian.bedrockwatch")
 
 C_RESET=$'\033[0m'; C_BOLD=$'\033[1m'; C_DIM=$'\033[2m'
 C_GREEN=$'\033[32m'; C_YELLOW=$'\033[33m'; C_CYAN=$'\033[36m'; C_RED=$'\033[31m'
@@ -234,6 +234,15 @@ print_status() {
     fi
   done
 
+  # The Bedrock watcher has no port, so it does not fit the loop above. It
+  # gets its own line anyway: it is the difference between watching for the
+  # iPad and not watching for it, and "not running" is worth saying out loud.
+  if job_loaded "com.guardian.bedrockwatch"; then
+    ok "$(printf '%-11s' "Bedrock") watcher running — waiting for the iPad to join"
+  else
+    warn "$(printf '%-11s' "Bedrock") watcher not running"
+  fi
+
   say ""
   say "  ${C_BOLD}Java / desktop${C_RESET}"
   say "    connect to  ${C_CYAN}127.0.0.1:$MC_PORT${C_RESET}"
@@ -376,6 +385,16 @@ bring_up() {
   ensure_job_loaded "com.guardian.pilot"
   launchctl kickstart -k "$DOMAIN/com.guardian.pilot" >/dev/null 2>&1 || true
   ok "Pilot watching — it restarts the world if the agent gets locked out."
+
+  # The Bedrock watcher: it waits for the iPad to join.
+  #
+  # It goes last with the pilot for the same kind of reason — it only has
+  # something to say once the world is up. It never touches the world; it
+  # only reads the server log, and it says so every thirty seconds so that
+  # "nothing happened" is distinguishable from "it stopped watching".
+  ensure_job_loaded "com.guardian.bedrockwatch"
+  launchctl kickstart -k "$DOMAIN/com.guardian.bedrockwatch" >/dev/null 2>&1 || true
+  ok "Bedrock watcher running — it will log the moment the iPad tries to join."
 }
 
 stop_all() {

@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  com.guardian.bedrockwatch.plist
+
+  The Bedrock watcher: something that notices when the iPad finally tries to
+  join the world.
+
+  WHY THIS EXISTS
+
+  The crossplay question has never been answered because the iPad has never
+  joined. Every attempt so far has been a person opening Minecraft on
+  Cyber-Portal and watching. That works right up until the watching has to
+  outlive a session — which is exactly what happened: the watcher was a
+  background task that died every hour and had to be re-armed.
+
+  A watcher whose lifetime is shorter than the thing it waits for is not a
+  watcher. So it is a job.
+
+  WHAT IT WATCHES FOR
+
+  Anything Bedrock-shaped in the server log: Geyser's own accept and refuse
+  lines, Floodgate's, any player join, any disconnect. The refusals are the
+  interesting ones — they say WHY a client was turned away, which is the
+  difference between "the version is too new" and "the transport is wrong".
+
+  It also writes a heartbeat every thirty seconds. A watcher that reports
+  "nothing happened" has to be able to report "I am still watching" with the
+  same confidence, because a dead pipeline and a quiet server look
+  identical otherwise.
+
+  It never touches the world. It only reads the log.
+-->
+<plist version="1.0">
+  <dict>
+    <key>Label</key>
+    <string>com.guardian.bedrockwatch</string>
+
+    <key>ProgramArguments</key>
+    <array>
+      <string>/bin/bash</string>
+      <string>/Users/resonant_jones/Keep/MineCraft_Companion/minecraft-ai-companion/scripts/runBedrockWatch.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/resonant_jones/Keep/MineCraft_Companion/minecraft-ai-companion</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- If the watcher dies, bring it back. A dead watcher is a visible
+         failure, unlike a dead pilot. -->
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>LimitLoadToSessionType</key>
+    <array>
+      <string>Aqua</string>
+    </array>
+
+    <key>StandardOutPath</key>
+    <string>/Users/resonant_jones/Keep/MineCraft_Companion/minecraft-ai-companion/.local/logs/bedrockwatch.out</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/resonant_jones/Keep/MineCraft_Companion/minecraft-ai-companion/.local/logs/bedrockwatch.err</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+  </dict>
+</plist>
