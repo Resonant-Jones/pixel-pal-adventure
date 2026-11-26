@@ -216,3 +216,103 @@ assert.strictEqual(shapeless.reason, "build_requires_shape");
 assert.ok(/house/i.test(shapeless.clarification), "should ask what to build");
 
 console.log("buildLaneRouter build-here tests passed");
+
+// --- The clarification must offer only words the parser accepts ---------------
+//
+// THE LOOP THIS TEST EXISTS FOR
+//
+// The vocabulary of buildable shapes was thirteen words, and the agent's
+// clarifying question was a string literal that offered four of them:
+//
+//   "Sure — what should I build? A house, a tower, a bridge, or a wall?"
+//
+// "wall" was not one of the thirteen. So the agent asked a child to choose
+// from four options, one of which returned the conversation to exactly the
+// same question. There was no way out of it.
+//
+// The rule now is structural: every word the offer contains must be a shape
+// the parser recognises. If the offer names something the parser would
+// reject, the conversation loops, and a child has no way to say "stop asking,
+// just build it".
+
+const { STRUCTURE_NOUNS } = require("../builder/buildIntent");
+const { classifyBuildRequest } = require("../builder/buildIntent");
+
+const shapelessAgain = routeBuildLane({ message: "build something cool", buildMode: "template_only" });
+assert.strictEqual(shapelessAgain.reason, "build_requires_shape");
+
+// Pull the offered words out of the sentence itself, so the test tracks the
+// message rather than a copy of it.
+const STOP_WORDS = new Set(["a", "or", "sure", "what", "should", "i", "build", "me"]);
+const offered = (shapelessAgain.clarification.match(/\b[a-z]+\b/gi) || [])
+  .map((word) => word.toLowerCase())
+  .filter((word) => !STOP_WORDS.has(word));
+
+assert.ok(offered.length > 0, "the clarification must actually offer something");
+
+for (const word of offered) {
+  const request = classifyBuildRequest(`build me a ${word}`);
+
+  assert.ok(
+    request.hasStructureCue,
+    `the clarification offers "${word}", but the parser does not recognise it as a shape — ` +
+      "answering the question would ask the same question again"
+  );
+
+  assert.strictEqual(
+    request.needsClarification,
+    false,
+    `the clarification offers "${word}", but asking for it still needs clarification — ` +
+      "that is the loop"
+  );
+}
+
+// --- The words a ten-year-old actually says must reach the task lane ---------
+//
+// "build a small wooden platform" was asked for live on 2026-11-25 and came
+// back as "what should I build?". These are the everyday shapes that were
+// missing from the vocabulary.
+
+const kidShapes = [
+  "platform", "wall", "fence", "path", "road", "floor", "roof", "deck",
+  "pillar", "arch", "gate", "stairs", "ladder", "farm", "garden", "shed",
+  "workshop", "garage", "barn", "castle", "palace", "dungeon", "monument",
+  "statue", "pyramid", "dome", "treehouse", "village", "rocket", "spaceship",
+  "robot", "dragon"
+];
+
+for (const shape of kidShapes) {
+  const result = routeBuildLane({ message: `build me a ${shape}`, buildMode: "template_only" });
+
+  assert.strictEqual(
+    result.lane,
+    "task",
+    `"build me a ${shape}" should reach the task lane, not ask a question`
+  );
+  assert.strictEqual(
+    result.reason,
+    "build_here_request",
+    `"build me a ${shape}" reason`
+  );
+}
+
+// Plurals have to work, because "build me two houses" is a normal sentence.
+const plural = routeBuildLane({ message: "build me two houses", buildMode: "template_only" });
+assert.strictEqual(plural.lane, "task", "plurals must be recognised too");
+
+// --- ...but ordinary English words must not become shapes --------------------
+//
+// "well" and "mine" were deliberately left out of the vocabulary. "build it
+// well" is a sentence, not a request for a well.
+
+for (const phrase of ["build it well", "make this mine"]) {
+  const request = classifyBuildRequest(phrase);
+
+  assert.strictEqual(
+    request.hasStructureCue,
+    false,
+    `"${phrase}" must not be read as naming a structure`
+  );
+}
+
+console.log("buildLaneRouter clarification-loop tests passed");

@@ -1,4 +1,34 @@
-const { classifyBuildRequest } = require("../builder/buildIntent");
+const { classifyBuildRequest, STRUCTURE_NOUNS } = require("../builder/buildIntent");
+
+// What to offer when a build request names no recognisable shape.
+//
+// THE OFFER MUST NOT CONTAIN A WORD THE PARSER WOULD REJECT.
+//
+// This list used to be a string literal:
+//
+//   "Sure — what should I build? A house, a tower, a bridge, or a wall?"
+//
+// and "wall" was not a shape the parser accepted. So the agent asked a child
+// to choose from four options, one of which sent the conversation straight
+// back to the same question. The child had no way out of it.
+//
+// The suggestions are filtered against the parser's own vocabulary, so the
+// two cannot drift apart again. Adding a word to STRUCTURE_NOUNS makes it
+// offerable; there is no second list to forget to update.
+const BUILD_SUGGESTIONS = ["house", "tower", "bridge", "wall", "castle", "treehouse"];
+
+function buildClarification() {
+  const offerable = BUILD_SUGGESTIONS.filter((word) => STRUCTURE_NOUNS.includes(word));
+  const words = (offerable.length ? offerable : STRUCTURE_NOUNS).slice(0, 4);
+
+  if (words.length === 1) {
+    return `Sure — what should I build? A ${words[0]}?`;
+  }
+
+  const last = words[words.length - 1];
+  const rest = words.slice(0, -1).map((word) => `a ${word}`).join(", ");
+  return `Sure — what should I build? ${rest}, or a ${last}?`;
+}
 
 function routeBuildLane({
   message,
@@ -70,8 +100,7 @@ function routeBuildLane({
     return {
       lane: "social",
       reason: "build_requires_shape",
-      clarification:
-        "Sure — what should I build? A house, a tower, a bridge, or a wall?"
+      clarification: buildClarification()
     };
   }
 

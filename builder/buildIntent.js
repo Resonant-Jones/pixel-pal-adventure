@@ -14,8 +14,53 @@ const ANCHOR_REFERENCE_PATTERN = /\b(?:anchor|this anchor|that anchor|the anchor
 // gets refused — which is precisely the request a kid is most likely to make.
 const CHAOS_CUE_PATTERN =
   /\b(pile|piles|stack|stacks|heap|maze|labyrinth|junk|scrap|mess|garbage|chaos|broken|glitchy|weird|silly|pointless|tnt|redstone|chests?)\b|\b(shouldn't|should not|doesn't work|does not work|not work)\b/;
-const STRUCTURE_CUE_PATTERN =
-  /\b(bridge|tower|camp|hut|cabin|house|home|shelter|base|template|blueprint|prebuilt|quick build)\b/;
+// The shapes a build request is allowed to name.
+//
+// THIS LIST IS THE WHOLE VOCABULARY OF BUILDING.
+//
+// It started as thirteen words, and it was the shortest list in the codebase
+// with the longest reach. A request naming anything outside it is not
+// refused — it is CLARIFIED. Guardian asks "what should I build?", the child
+// answers, and the answer is parsed by the same thirteen words.
+//
+// So the failure was silent and it looped.
+//
+// On 2026-11-25 a live test asked for "a small wooden platform 5 blocks
+// across" and got back: "Sure — what should I build? A house, a tower, a
+// bridge, or a wall?" — and "wall" was not in the list either. A child who
+// answered "a wall" would have been asked the same question again, forever.
+//
+// These are the words a ten-year-old actually says. If one is missing, the
+// child gets a question instead of a thing.
+//
+// "well" and "mine" are deliberately absent: both are ordinary English words
+// long before they are buildable shapes, and "build it well" must not be
+// read as "build a well".
+const STRUCTURE_NOUNS = [
+  // the originals
+  "bridge", "tower", "camp", "hut", "cabin", "house", "home", "shelter",
+  "base", "template", "blueprint", "prebuilt",
+  // walls, ground and edges
+  "wall", "fence", "path", "road", "floor", "roof", "platform", "deck",
+  "pillar", "arch", "gate", "stairs", "ladder",
+  // places
+  "farm", "garden", "shed", "workshop", "garage", "barn", "stable",
+  "outpost", "quarry", "castle", "palace", "fort", "fortress", "dungeon",
+  "museum", "library", "observatory", "lighthouse", "village", "town",
+  "arena",
+  // things worth making
+  "monument", "statue", "obelisk", "pyramid", "dome", "treehouse",
+  "fountain", "pool", "portal", "tunnel", "cave", "rocket", "spaceship",
+  "robot", "dragon"
+];
+
+// Plurals are allowed, because "build me two houses" has to work too.
+const STRUCTURE_CUE_PATTERN = new RegExp(
+  `\\b(?:${STRUCTURE_NOUNS.join("|")})(?:s|es)?\\b`
+);
+// "quick build" is a phrase, not a noun.
+const QUICK_BUILD_PATTERN = /\bquick build\b/;
+
 // A child nudging a stalled build says "keep going" or "finish it", not
 // "build me a house". Without this, a resume nudge reads as a fresh build
 // request and queues a duplicate job — the reported "forgot what it was
@@ -109,7 +154,10 @@ function extractTargetReference(text, resolvedAnchor = null) {
 
 function hasStructureCue(text) {
   const normalized = normalizeText(text);
-  return STRUCTURE_CUE_PATTERN.test(normalized) || CHAOS_CUE_PATTERN.test(normalized);
+  return (
+    STRUCTURE_CUE_PATTERN.test(normalized) || QUICK_BUILD_PATTERN.test(normalized) ||
+    CHAOS_CUE_PATTERN.test(normalized)
+  );
 }
 
 // "shouldn't" is a negation, not a hypothetical.
@@ -182,6 +230,9 @@ function classifyBuildRequest(message, { resolvedAnchor = null } = {}) {
 
 module.exports = {
   CHAOS_CUE_PATTERN,
+  QUICK_BUILD_PATTERN,
+  STRUCTURE_CUE_PATTERN,
+  STRUCTURE_NOUNS,
   classifyBuildRequest,
   extractTargetReference,
   hasStructureCue,

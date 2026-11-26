@@ -11,6 +11,28 @@ const BUILD_SITE_RETRY_DELAY_MS = 30000;
 const BUILD_BLOCKED_RETRY_DELAY_MS = 30000;
 const BUILD_MATERIAL_RETRY_DELAY_MS = 120000;
 
+// How long a build may sit behind the survival lease before it is started
+// anyway.
+//
+// This exists because of what was found live on 2026-11-25: Guardian was
+// asked for a platform, the plan compiled, the job was queued — and then the
+// bot sat in a puddle with four creepers and two zombies eleven blocks
+// away. threatRange is twelve. The survival controller held the movement
+// lease because "the threat has not gone", the build worker stood down
+// because the lease was held, and the job stayed "pending" for ten minutes
+// with nothing in the log and nothing said to the child.
+//
+// The wait is bounded because a promise that is never fulfilled is worse
+// than a promise that is broken loudly. And the build already knows how to
+// be interrupted: assertTaskMovementAllowed throws "Task interrupted for
+// self-preservation", the worker pauses the job at its checkpoint, and after
+// three pauses with no world progress it FAILS with a recorded reason. That
+// contract is the right outcome — it just never applied, because the job
+// never started.
+//
+// So after this long, start it and let that contract decide.
+const SURVIVAL_WAIT_GRACE_MS = 60_000;
+
 // Recovery contract: a build may pause at most this many consecutive times
 // without any meaningful world progress. On the next pause it fails loudly
 // with a recorded reason instead of stalling forever. The child must never
@@ -73,13 +95,40 @@ class BuildWorker {
     this.maxConsecutiveNoProgressPauses = maxConsecutiveNoProgressPauses;
     this.logger = logger;
     this.running = false;
+    // When a build cannot start, say so — and say it at a human rate.
+    this.lastWaitReportAt = 0;
+    this.lastWaitReason = null;
+    this.waitingJobId = null;
+    this.waitingSince = 0;
+  }
+
+  // A build job that cannot start must not sit there silently.
+  //
+  // This was found live on 2026-11-25: a build was requested, the plan
+  // compiled, the job was created and queued — and then nothing happened for
+  // eight minutes. No log line, no error, no chat. The job simply stayed
+  // "pending" and the child had been told "I'll build a small oak cabin".
+  //
+  // The cause was the survival lease: the bot was holding it because a threat
+  // was near, and the worker stood down because of it. Correct behaviour,
+  // but it was invisible — and an invisible stall is the same thing as a
+  // broken builder, to whoever is waiting for the cabin.
+  reportWaiting(job, reason) {
+    const now = Date.now();
+
+    if (this.lastWaitReason === reason && now - this.lastWaitReportAt < 30_000) {
+      return;
+    }
+
+    this.lastWaitReportAt = now;
+    this.lastWaitReason = reason;
+    this.logger.warn?.(
+      `[build] A build is queued and waiting: ${reason}. It will start as soon as the bot is free. ` +
+        `Job ${String(job.id)}`
+    );
   }
 
   async runOnce() {
-    if (this.running || this.botAdapter?.survivalLease) {
-      return false;
-    }
-
     const context = this.getWorldContext();
     if (!context?.worldId || !context?.sessionId) {
       return false;
@@ -87,10 +136,43 @@ class BuildWorker {
 
     const job = await this.jobStore.getNextBuildJob(context.worldId);
     if (!job) {
+      this.lastWaitReason = null;
       return false;
     }
 
+    // There IS a build waiting. Anything that stops it from starting has to
+    // be visible, because "nothing is happening" is the worst possible
+    // answer to a child who asked for something.
+    if (this.running) {
+      this.reportWaiting(job, "another build is still running");
+      return false;
+    }
+
+    if (this.botAdapter?.survivalLease) {
+      // How long has this job been waiting on the bot being free?
+      if (this.waitingJobId !== String(job.id)) {
+        this.waitingJobId = String(job.id);
+        this.waitingSince = Date.now();
+      }
+
+      const waitedMs = Date.now() - this.waitingSince;
+
+      if (waitedMs < SURVIVAL_WAIT_GRACE_MS) {
+        this.reportWaiting(job, "the bot is busy keeping itself alive");
+        return false;
+      }
+
+      this.logger.warn?.(
+        `[build] A build has waited ${Math.round(waitedMs / 1000)}s for the bot to be free. ` +
+          "Starting it anyway — if survival interrupts it the build checkpoints, and if it never " +
+          "progresses it fails loudly instead of waiting forever. Job " +
+          String(job.id)
+      );
+    }
+
     this.running = true;
+    this.waitingJobId = null;
+    this.waitingSince = 0;
 
     try {
       await this.jobStore.markRunning(job.id);

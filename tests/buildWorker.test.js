@@ -500,6 +500,75 @@ function testClassifier() {
   console.log("  ✓ error classifier separates transport from logic faults");
 }
 
+// --- A build must not wait forever behind the survival lease ------------------
+//
+// THIS TEST EXISTS FOR A LIVE FAILURE
+//
+// On 2026-11-25 Guardian was asked for a platform. The plan compiled, the job
+// was queued, and then the bot sat in a puddle with four creepers and two
+// zombies eleven blocks away — inside the twelve-block threat range. The
+// survival controller held the movement lease because "the threat has not
+// gone". The build worker stood down because the lease was held.
+//
+// The job stayed "pending" for ten minutes. Nothing in the log. Nothing said
+// to the child. The build never started, which meant the worker's own
+// "fail loudly after three pauses with no progress" contract never applied —
+// it only covers builds that START.
+//
+// So the wait behind the lease has to be bounded. After the grace, the build
+// starts, and the existing interruption contract decides the outcome.
+
+async function testSurvivalLeaseDoesNotStallABuildForever() {
+  const job = { id: "job-survival", status: "pending", payload: { plan: {} } };
+
+  const jobStore = createFakeJobStore({
+    async getNextBuildJob() {
+      return job;
+    }
+  });
+
+  const warnings = [];
+  const botAdapter = createFakeBotAdapter({ survivalLease: { bot: {}, epoch: 1 } });
+
+  const worker = new BuildWorker({
+    botAdapter,
+    jobStore,
+    eventStore: createFakeEventStore(),
+    threadId: "thread-1",
+    getWorldContext: () => ({ worldId: "world-1", sessionId: "session-1", threadId: "thread-1" }),
+    logger: { info() {}, warn: (...args) => warnings.push(args.join(" ")), error() {} }
+  });
+
+  // First tick: the bot is being kept alive, so the build waits — and says so.
+  const first = await worker.runOnce();
+
+  assert.strictEqual(first, false, "a build must not start while the bot is being kept alive");
+  assert.strictEqual(
+    jobStore.calls.running.length,
+    0,
+    "the job must not be marked running while it is waiting"
+  );
+  assert.ok(
+    warnings.some((line) => /queued and waiting/i.test(line)),
+    "the wait must be visible in the log — a silent stall is the same as a broken builder"
+  );
+
+  // Pretend it has been waiting well past the grace.
+  worker.waitingSince = Date.now() - 10 * 60_000;
+
+  await worker.runOnce();
+
+  assert.strictEqual(
+    jobStore.calls.running.length,
+    1,
+    "after the grace the build must start, so the no-progress contract can decide its fate"
+  );
+  assert.ok(
+    warnings.some((line) => /Starting it anyway/i.test(line)),
+    "starting a build past its grace must be announced"
+  );
+}
+
 (async () => {
   console.log("buildWorker tests");
 
@@ -513,6 +582,7 @@ function testClassifier() {
   await testProgressResetsTheStallCounter();
   await testPresenceReleasedOnEveryTerminalPath();
   await testSuccessfulBuildCompletes();
+  await testSurvivalLeaseDoesNotStallABuildForever();
 
   console.log("buildWorker tests passed");
 })().catch((error) => {
